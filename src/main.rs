@@ -13,17 +13,17 @@ fn main() {
         process::exit(1);
     }
 
-    let output = if args[1].ends_with(".y4m") {
-        if args.len() < 4 || args[2] != "-o" {
+    let (data, output_path) = if args[1].ends_with(".y4m") {
+        if args[2] != "-o" {
             eprintln!("Usage: wav1c <input.y4m> -o <output.ivf>");
             process::exit(1);
         }
         let input_path = Path::new(&args[1]);
-        let pixels = wav1c::y4m::FramePixels::from_y4m_file(input_path).unwrap_or_else(|e| {
+        let frames = wav1c::y4m::FramePixels::all_from_y4m_file(input_path).unwrap_or_else(|e| {
             eprintln!("Error reading {}: {}", args[1], e);
             process::exit(1);
         });
-        (wav1c::encode_av1_ivf_y4m(&pixels), args[3].clone())
+        (wav1c::encode_av1_ivf_multi(&frames), args[3].clone())
     } else {
         if args.len() < 8 || args[6] != "-o" {
             eprintln!("Usage: wav1c <width> <height> <Y> <U> <V> -o <output.ivf>");
@@ -53,8 +53,6 @@ fn main() {
 
         (wav1c::encode_av1_ivf(width, height, y, u, v), args[7].clone())
     };
-
-    let (data, output_path) = output;
 
     let mut file = File::create(&output_path).unwrap_or_else(|e| {
         eprintln!("Error creating {}: {}", output_path, e);

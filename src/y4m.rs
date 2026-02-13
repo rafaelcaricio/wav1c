@@ -7,7 +7,7 @@ pub struct FramePixels {
 }
 
 impl FramePixels {
-    pub fn from_y4m(data: &[u8]) -> Self {
+    pub fn all_from_y4m(data: &[u8]) -> Vec<Self> {
         let header_end = data
             .iter()
             .position(|&b| b == b'\n')
@@ -39,35 +39,54 @@ impl FramePixels {
 
         assert!(width > 0 && height > 0, "Missing W/H in Y4M header");
 
-        let frame_marker = b"FRAME\n";
-        let frame_start = data
-            .windows(frame_marker.len())
-            .position(|w| w == frame_marker)
-            .expect("No FRAME marker in Y4M data")
-            + frame_marker.len();
-
         let y_size = (width * height) as usize;
         let uv_w = width.div_ceil(2) as usize;
         let uv_h = height.div_ceil(2) as usize;
         let uv_size = uv_w * uv_h;
+        let frame_data_size = y_size + 2 * uv_size;
+        let frame_marker = b"FRAME\n";
 
-        let y_plane = data[frame_start..frame_start + y_size].to_vec();
-        let u_plane = data[frame_start + y_size..frame_start + y_size + uv_size].to_vec();
-        let v_plane =
-            data[frame_start + y_size + uv_size..frame_start + y_size + 2 * uv_size].to_vec();
+        let mut frames = Vec::new();
+        let mut pos = header_end + 1;
 
-        Self {
-            y: y_plane,
-            u: u_plane,
-            v: v_plane,
-            width,
-            height,
+        while pos + frame_marker.len() <= data.len()
+            && &data[pos..pos + frame_marker.len()] == frame_marker
+        {
+            let pixel_start = pos + frame_marker.len();
+            assert!(
+                pixel_start + frame_data_size <= data.len(),
+                "Truncated frame data"
+            );
+
+            let y_plane = data[pixel_start..pixel_start + y_size].to_vec();
+            let u_plane =
+                data[pixel_start + y_size..pixel_start + y_size + uv_size].to_vec();
+            let v_plane =
+                data[pixel_start + y_size + uv_size..pixel_start + frame_data_size].to_vec();
+
+            frames.push(Self {
+                y: y_plane,
+                u: u_plane,
+                v: v_plane,
+                width,
+                height,
+            });
+
+            pos = pixel_start + frame_data_size;
         }
+
+        frames
     }
 
-    pub fn from_y4m_file(path: &std::path::Path) -> std::io::Result<Self> {
+    pub fn all_from_y4m_file(path: &std::path::Path) -> std::io::Result<Vec<Self>> {
         let data = std::fs::read(path)?;
-        Ok(Self::from_y4m(&data))
+        Ok(Self::all_from_y4m(&data))
+    }
+
+    pub fn from_y4m(data: &[u8]) -> Self {
+        let mut frames = Self::all_from_y4m(data);
+        assert!(!frames.is_empty(), "No FRAME marker in Y4M data");
+        frames.swap_remove(0)
     }
 
     pub fn solid(width: u32, height: u32, y: u8, u: u8, v: u8) -> Self {
@@ -150,5 +169,59 @@ mod tests {
         assert_eq!(pixels.y.len(), 17 * 33);
         assert_eq!(pixels.u.len(), 9 * 17);
         assert_eq!(pixels.v.len(), 9 * 17);
+    }
+
+    fn create_multi_frame_y4m(
+        width: u32,
+        height: u32,
+        frame_values: &[(u8, u8, u8)],
+    ) -> Vec<u8> {
+        let header = format!("YUV4MPEG2 W{} H{} F30:1 Ip C420jpeg\n", width, height);
+        let mut data = header.into_bytes();
+        let y_size = (width * height) as usize;
+        let uv_w = width.div_ceil(2) as usize;
+        let uv_h = height.div_ceil(2) as usize;
+        let uv_size = uv_w * uv_h;
+        for &(y_val, u_val, v_val) in frame_values {
+            data.extend_from_slice(b"FRAME\n");
+            data.extend(vec![y_val; y_size]);
+            data.extend(vec![u_val; uv_size]);
+            data.extend(vec![v_val; uv_size]);
+        }
+        data
+    }
+
+    #[test]
+    fn parse_multi_frame_y4m() {
+        let y4m = create_multi_frame_y4m(16, 16, &[(100, 110, 120), (130, 140, 150), (200, 210, 220)]);
+        let frames = FramePixels::all_from_y4m(&y4m);
+        assert_eq!(frames.len(), 3);
+
+        assert_eq!(frames[0].width, 16);
+        assert_eq!(frames[0].height, 16);
+        assert!(frames[0].y.iter().all(|&p| p == 100));
+        assert!(frames[0].u.iter().all(|&p| p == 110));
+        assert!(frames[0].v.iter().all(|&p| p == 120));
+
+        assert!(frames[1].y.iter().all(|&p| p == 130));
+        assert!(frames[1].u.iter().all(|&p| p == 140));
+        assert!(frames[1].v.iter().all(|&p| p == 150));
+
+        assert!(frames[2].y.iter().all(|&p| p == 200));
+        assert!(frames[2].u.iter().all(|&p| p == 210));
+        assert!(frames[2].v.iter().all(|&p| p == 220));
+    }
+
+    #[test]
+    fn all_from_y4m_single_frame() {
+        let y4m = create_test_y4m(64, 64, 128, 128, 128);
+        let frames = FramePixels::all_from_y4m(&y4m);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].width, 64);
+        assert_eq!(frames[0].height, 64);
+        assert_eq!(frames[0].y.len(), 64 * 64);
+        assert_eq!(frames[0].u.len(), 32 * 32);
+        assert_eq!(frames[0].v.len(), 32 * 32);
+        assert!(frames[0].y.iter().all(|&p| p == 128));
     }
 }

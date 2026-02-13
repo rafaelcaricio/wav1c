@@ -45,7 +45,7 @@ fn extract_y4m_planes(y4m_data: &[u8], width: u32, height: u32) -> (Vec<u8>, Vec
         + frame_marker.len();
 
     let y_size = (width * height) as usize;
-    let uv_size = ((width / 2) * (height / 2)) as usize;
+    let uv_size = (width.div_ceil(2) * height.div_ceil(2)) as usize;
     let y_plane = y4m_data[frame_start..frame_start + y_size].to_vec();
     let u_plane = y4m_data[frame_start + y_size..frame_start + y_size + uv_size].to_vec();
     let v_plane = y4m_data[frame_start + y_size + uv_size..frame_start + y_size + 2 * uv_size].to_vec();
@@ -256,6 +256,39 @@ fn dav1d_decodes_colors_at_various_dimensions() {
     }
 }
 
+fn create_multi_frame_y4m(
+    width: u32,
+    height: u32,
+    frame_fns: &[&dyn Fn(u32, u32) -> (u8, u8, u8)],
+) -> Vec<u8> {
+    let header = format!("YUV4MPEG2 W{} H{} F25:1 Ip C420jpeg\n", width, height);
+    let mut data = header.into_bytes();
+    let uv_w = width.div_ceil(2);
+    let uv_h = height.div_ceil(2);
+    for frame_fn in frame_fns {
+        data.extend_from_slice(b"FRAME\n");
+        for row in 0..height {
+            for col in 0..width {
+                let (y, _, _) = frame_fn(col, row);
+                data.push(y);
+            }
+        }
+        for row in 0..uv_h {
+            for col in 0..uv_w {
+                let (_, u, _) = frame_fn((col * 2).min(width - 1), (row * 2).min(height - 1));
+                data.push(u);
+            }
+        }
+        for row in 0..uv_h {
+            for col in 0..uv_w {
+                let (_, _, v) = frame_fn((col * 2).min(width - 1), (row * 2).min(height - 1));
+                data.push(v);
+            }
+        }
+    }
+    data
+}
+
 fn create_test_y4m(
     width: u32,
     height: u32,
@@ -263,6 +296,8 @@ fn create_test_y4m(
 ) -> Vec<u8> {
     let header = format!("YUV4MPEG2 W{} H{} F30:1 Ip C420jpeg\n", width, height);
     let mut data = header.into_bytes();
+    let uv_w = width.div_ceil(2);
+    let uv_h = height.div_ceil(2);
     data.extend_from_slice(b"FRAME\n");
     for row in 0..height {
         for col in 0..width {
@@ -270,15 +305,15 @@ fn create_test_y4m(
             data.push(y);
         }
     }
-    for row in 0..height / 2 {
-        for col in 0..width / 2 {
-            let (_, u, _) = pixel_fn(col * 2, row * 2);
+    for row in 0..uv_h {
+        for col in 0..uv_w {
+            let (_, u, _) = pixel_fn((col * 2).min(width - 1), (row * 2).min(height - 1));
             data.push(u);
         }
     }
-    for row in 0..height / 2 {
-        for col in 0..width / 2 {
-            let (_, _, v) = pixel_fn(col * 2, row * 2);
+    for row in 0..uv_h {
+        for col in 0..uv_w {
+            let (_, _, v) = pixel_fn((col * 2).min(width - 1), (row * 2).min(height - 1));
             data.push(v);
         }
     }
@@ -406,4 +441,86 @@ fn dav1d_decodes_gradient_multi_sb() {
             w, h, stderr
         );
     }
+}
+
+#[test]
+fn dav1d_decodes_multi_frame_solid() {
+    let Some(dav1d) = dav1d_path() else {
+        return;
+    };
+
+    let solid: Box<dyn Fn(u32, u32) -> (u8, u8, u8)> = Box::new(|_col, _row| (128, 128, 128));
+    let frame_fns: Vec<&dyn Fn(u32, u32) -> (u8, u8, u8)> = vec![&*solid; 5];
+    let y4m_data = create_multi_frame_y4m(64, 64, &frame_fns);
+    let frames = FramePixels::all_from_y4m(&y4m_data);
+    let output = wav1c::encode_av1_ivf_multi(&frames);
+    let (success, stderr, _) = decode_to_y4m(&dav1d, &output, "multi_solid");
+    assert!(success, "dav1d failed for multi-frame solid: {}", stderr);
+    assert!(
+        stderr.contains("Decoded 5/5 frames"),
+        "Expected 5 decoded frames: {}",
+        stderr
+    );
+}
+
+#[test]
+fn dav1d_decodes_multi_frame_varying() {
+    let Some(dav1d) = dav1d_path() else {
+        return;
+    };
+
+    let black: Box<dyn Fn(u32, u32) -> (u8, u8, u8)> = Box::new(|_col, _row| (0, 128, 128));
+    let white: Box<dyn Fn(u32, u32) -> (u8, u8, u8)> = Box::new(|_col, _row| (255, 128, 128));
+    let gray: Box<dyn Fn(u32, u32) -> (u8, u8, u8)> = Box::new(|_col, _row| (128, 128, 128));
+    let frame_fns: Vec<&dyn Fn(u32, u32) -> (u8, u8, u8)> = vec![&*black, &*white, &*gray];
+    let y4m_data = create_multi_frame_y4m(64, 64, &frame_fns);
+    let frames = FramePixels::all_from_y4m(&y4m_data);
+    let output = wav1c::encode_av1_ivf_multi(&frames);
+    let (success, stderr, _) = decode_to_y4m(&dav1d, &output, "multi_varying");
+    assert!(success, "dav1d failed for multi-frame varying: {}", stderr);
+    assert!(
+        stderr.contains("Decoded 3/3 frames"),
+        "Expected 3 decoded frames: {}",
+        stderr
+    );
+}
+
+#[test]
+fn dav1d_decodes_multi_frame_gradient() {
+    let Some(dav1d) = dav1d_path() else {
+        return;
+    };
+
+    let f0: Box<dyn Fn(u32, u32) -> (u8, u8, u8)> = Box::new(|col, _row| {
+        let y = (col * 255 / 319).min(255) as u8;
+        (y, 128, 128)
+    });
+    let f1: Box<dyn Fn(u32, u32) -> (u8, u8, u8)> = Box::new(|_col, row| {
+        let y = (row * 255 / 239).min(255) as u8;
+        (y, 128, 128)
+    });
+    let f2: Box<dyn Fn(u32, u32) -> (u8, u8, u8)> = Box::new(|col, _row| {
+        let y = 255 - (col * 255 / 319).min(255) as u8;
+        (y, 128, 128)
+    });
+    let f3: Box<dyn Fn(u32, u32) -> (u8, u8, u8)> = Box::new(|_col, row| {
+        let y = 255 - (row * 255 / 239).min(255) as u8;
+        (y, 128, 128)
+    });
+    let f4: Box<dyn Fn(u32, u32) -> (u8, u8, u8)> = Box::new(|col, row| {
+        let y = ((col + row) * 255 / (319 + 239)).min(255) as u8;
+        (y, 128, 128)
+    });
+    let frame_fns: Vec<&dyn Fn(u32, u32) -> (u8, u8, u8)> =
+        vec![&*f0, &*f1, &*f2, &*f3, &*f4];
+    let y4m_data = create_multi_frame_y4m(320, 240, &frame_fns);
+    let frames = FramePixels::all_from_y4m(&y4m_data);
+    let output = wav1c::encode_av1_ivf_multi(&frames);
+    let (success, stderr, _) = decode_to_y4m(&dav1d, &output, "multi_gradient");
+    assert!(success, "dav1d failed for multi-frame gradient: {}", stderr);
+    assert!(
+        stderr.contains("Decoded 5/5 frames"),
+        "Expected 5 decoded frames: {}",
+        stderr
+    );
 }
