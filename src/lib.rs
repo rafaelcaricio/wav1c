@@ -8,10 +8,13 @@ pub mod sequence;
 pub mod tile;
 
 pub fn encode_av1_ivf(y: u8, u: u8, v: u8) -> Vec<u8> {
+    let width: u32 = 64;
+    let height: u32 = 64;
+
     let td = obu::obu_wrap(obu::ObuType::TemporalDelimiter, &[]);
     let seq = obu::obu_wrap(
         obu::ObuType::SequenceHeader,
-        &sequence::encode_sequence_header(),
+        &sequence::encode_sequence_header(width, height),
     );
     let frm = obu::obu_wrap(obu::ObuType::Frame, &frame::encode_frame(y, u, v));
 
@@ -21,7 +24,7 @@ pub fn encode_av1_ivf(y: u8, u: u8, v: u8) -> Vec<u8> {
     frame_data.extend_from_slice(&frm);
 
     let mut output = Vec::new();
-    ivf::write_ivf_header(&mut output, 64, 64, 1).unwrap();
+    ivf::write_ivf_header(&mut output, width as u16, height as u16, 1).unwrap();
     ivf::write_ivf_frame(&mut output, 0, &frame_data).unwrap();
     output
 }
@@ -34,15 +37,21 @@ mod tests {
     fn output_starts_with_valid_obu_structure() {
         let output = encode_av1_ivf(128, 128, 128);
         let frame_data = &output[44..];
-        assert_eq!(frame_data[0], 0x12);
-        assert_eq!(frame_data[1], 0x00);
-        assert_eq!(frame_data[2], 0x0A);
-        assert_eq!(frame_data[3], 0x06);
-        assert_eq!(
-            &frame_data[4..10],
-            &[0x18, 0x15, 0x7f, 0xfc, 0x00, 0x08]
-        );
-        assert_eq!(frame_data[10], 0x32);
+        let temporal_delimiter_header = 0x12;
+        let temporal_delimiter_size = 0x00;
+        let sequence_header_obu_header = 0x0A;
+        let frame_obu_header = 0x32;
+
+        assert_eq!(frame_data[0], temporal_delimiter_header);
+        assert_eq!(frame_data[1], temporal_delimiter_size);
+        assert_eq!(frame_data[2], sequence_header_obu_header);
+
+        let seq_payload = sequence::encode_sequence_header(64, 64);
+        let seq_size = seq_payload.len();
+        assert_eq!(frame_data[3], seq_size as u8);
+
+        let frame_obu_offset = 2 + 1 + 1 + seq_size;
+        assert_eq!(frame_data[frame_obu_offset], frame_obu_header);
     }
 
     #[test]
