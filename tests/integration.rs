@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
+use wav1c::y4m::FramePixels;
 
 fn dav1d_path() -> Option<std::path::PathBuf> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../dav1d/build/tools/dav1d");
@@ -251,6 +252,158 @@ fn dav1d_decodes_colors_at_various_dimensions() {
             success,
             "dav1d failed for {}x{} color ({},{},{}): {}",
             w, h, y, u, v, stderr
+        );
+    }
+}
+
+fn create_test_y4m(
+    width: u32,
+    height: u32,
+    pixel_fn: impl Fn(u32, u32) -> (u8, u8, u8),
+) -> Vec<u8> {
+    let header = format!("YUV4MPEG2 W{} H{} F30:1 Ip C420jpeg\n", width, height);
+    let mut data = header.into_bytes();
+    data.extend_from_slice(b"FRAME\n");
+    for row in 0..height {
+        for col in 0..width {
+            let (y, _, _) = pixel_fn(col, row);
+            data.push(y);
+        }
+    }
+    for row in 0..height / 2 {
+        for col in 0..width / 2 {
+            let (_, u, _) = pixel_fn(col * 2, row * 2);
+            data.push(u);
+        }
+    }
+    for row in 0..height / 2 {
+        for col in 0..width / 2 {
+            let (_, _, v) = pixel_fn(col * 2, row * 2);
+            data.push(v);
+        }
+    }
+    data
+}
+
+#[test]
+fn dav1d_decodes_gradient_y4m() {
+    let Some(dav1d) = dav1d_path() else {
+        return;
+    };
+
+    let y4m_data = create_test_y4m(64, 64, |col, row| {
+        let y = ((row * 4) as u8).min(252);
+        let u = ((col * 4) as u8).min(252);
+        let v = 128;
+        (y, u, v)
+    });
+    let pixels = FramePixels::from_y4m(&y4m_data);
+    let output = wav1c::encode_av1_ivf_y4m(&pixels);
+    let (success, stderr, _) = decode_to_y4m(&dav1d, &output, "gradient_y4m");
+    assert!(success, "dav1d failed for gradient Y4M: {}", stderr);
+    assert!(
+        stderr.contains("Decoded 1/1 frames"),
+        "Unexpected: {}",
+        stderr
+    );
+}
+
+#[test]
+fn dav1d_decodes_solid_y4m() {
+    let Some(dav1d) = dav1d_path() else {
+        return;
+    };
+
+    let test_cases: &[(u8, u8, u8)] = &[
+        (128, 128, 128),
+        (0, 128, 128),
+        (255, 128, 128),
+        (81, 91, 81),
+    ];
+
+    for &(y, u, v) in test_cases {
+        let pixels = FramePixels::solid(64, 64, y, u, v);
+        let y4m_output = wav1c::encode_av1_ivf_y4m(&pixels);
+        let solid_output = wav1c::encode_av1_ivf(64, 64, y, u, v);
+        assert_eq!(
+            y4m_output, solid_output,
+            "Y4M and solid API differ for ({},{},{})",
+            y, u, v
+        );
+
+        let (success, stderr, _) =
+            decode_to_y4m(&dav1d, &y4m_output, &format!("solid_y4m_{}_{}_{}", y, u, v));
+        assert!(
+            success,
+            "dav1d failed for solid Y4M ({},{},{}): {}",
+            y, u, v, stderr
+        );
+    }
+}
+
+#[test]
+fn y4m_various_dimensions() {
+    let Some(dav1d) = dav1d_path() else {
+        return;
+    };
+
+    let dimensions: &[(u32, u32)] = &[
+        (64, 64),
+        (100, 100),
+        (128, 128),
+        (320, 240),
+        (640, 480),
+    ];
+
+    for &(w, h) in dimensions {
+        let y4m_data = create_test_y4m(w, h, |col, row| {
+            let y = ((row % 256) as u8).wrapping_add((col % 64) as u8).wrapping_mul(3);
+            let u = ((col * 256 / w) as u8).min(255);
+            let v = ((row * 256 / h) as u8).min(255);
+            (y, u, v)
+        });
+        let pixels = FramePixels::from_y4m(&y4m_data);
+        let output = wav1c::encode_av1_ivf_y4m(&pixels);
+        let (success, stderr, _) =
+            decode_to_y4m(&dav1d, &output, &format!("y4m_dim_{}x{}", w, h));
+        assert!(
+            success,
+            "dav1d failed for Y4M {}x{}: {}",
+            w, h, stderr
+        );
+        assert!(
+            stderr.contains("Decoded 1/1 frames"),
+            "Unexpected for Y4M {}x{}: {}",
+            w, h, stderr
+        );
+    }
+}
+
+#[test]
+fn dav1d_decodes_gradient_multi_sb() {
+    let Some(dav1d) = dav1d_path() else {
+        return;
+    };
+
+    let dimensions: &[(u32, u32)] = &[
+        (128, 128),
+        (320, 240),
+        (640, 480),
+    ];
+
+    for &(w, h) in dimensions {
+        let y4m_data = create_test_y4m(w, h, |_col, row| {
+            let y = if row < 64 { 50 } else { 200 };
+            (y, 128, 128)
+        });
+        let pixels = FramePixels::from_y4m(&y4m_data);
+        let output = wav1c::encode_av1_ivf_y4m(&pixels);
+        let (success, stderr, _) =
+            decode_to_y4m(&dav1d, &output, &format!("gradient_multi_{}x{}", w, h));
+        assert!(
+            success,
+            "dav1d failed for gradient {}x{}: {}",
+            w, h, stderr
         );
     }
 }
