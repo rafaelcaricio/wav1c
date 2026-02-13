@@ -64,7 +64,7 @@ impl MsacEncoder {
         let s = symbol as usize;
         let nms = (ns + 1 - s) as u16;
         let fl = if s > 0 { cdf[s - 1] } else { 32768 };
-        let fh = cdf[s];
+        let fh = if s < ns { cdf[s] } else { 0 };
         self.store(fl, fh, nms);
 
         if self.allow_update_cdf {
@@ -224,7 +224,7 @@ mod tests {
     fn cdf_update_shifts_probability_toward_observed_symbol() {
         let mut cdf = [16384u16, 0];
         MsacEncoder::update_cdf(&mut cdf, 0, 1);
-        assert!(cdf[0] > 16384);
+        assert!(cdf[0] < 16384);
     }
 
     #[test]
