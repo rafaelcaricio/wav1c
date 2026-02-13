@@ -5,6 +5,7 @@ pub mod ivf;
 pub mod msac;
 pub mod obu;
 pub mod sequence;
+pub mod tile;
 
 pub fn encode_av1_ivf() -> Vec<u8> {
     let td = obu::obu_wrap(obu::ObuType::TemporalDelimiter, &[]);
@@ -13,6 +14,25 @@ pub fn encode_av1_ivf() -> Vec<u8> {
         &sequence::encode_sequence_header(),
     );
     let frm = obu::obu_wrap(obu::ObuType::Frame, &frame::encode_frame());
+
+    let mut frame_data = Vec::new();
+    frame_data.extend_from_slice(&td);
+    frame_data.extend_from_slice(&seq);
+    frame_data.extend_from_slice(&frm);
+
+    let mut output = Vec::new();
+    ivf::write_ivf_header(&mut output, 64, 64, 1).unwrap();
+    ivf::write_ivf_frame(&mut output, 0, &frame_data).unwrap();
+    output
+}
+
+pub fn encode_av1_ivf_color(y: u8, u: u8, v: u8) -> Vec<u8> {
+    let td = obu::obu_wrap(obu::ObuType::TemporalDelimiter, &[]);
+    let seq = obu::obu_wrap(
+        obu::ObuType::SequenceHeader,
+        &sequence::encode_sequence_header(),
+    );
+    let frm = obu::obu_wrap(obu::ObuType::Frame, &frame::encode_frame_color(y, u, v));
 
     let mut frame_data = Vec::new();
     frame_data.extend_from_slice(&td);

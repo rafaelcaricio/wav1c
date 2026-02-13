@@ -12,23 +12,21 @@ fn main() {
         process::exit(1);
     }
 
-    let _y: u8 = args[1].parse().unwrap_or_else(|_| {
+    let y: u8 = args[1].parse().unwrap_or_else(|_| {
         eprintln!("Error: Y must be 0-255");
         process::exit(1);
     });
-    let _u: u8 = args[2].parse().unwrap_or_else(|_| {
+    let u: u8 = args[2].parse().unwrap_or_else(|_| {
         eprintln!("Error: U must be 0-255");
         process::exit(1);
     });
-    let _v: u8 = args[3].parse().unwrap_or_else(|_| {
+    let v: u8 = args[3].parse().unwrap_or_else(|_| {
         eprintln!("Error: V must be 0-255");
         process::exit(1);
     });
     let output_path = &args[5];
 
-    eprintln!("Warning: Color input is ignored in this iteration. Output is always solid green (Y=81, U=91, V=81).");
-
-    let output = wav1c::encode_av1_ivf();
+    let output = wav1c::encode_av1_ivf_color(y, u, v);
 
     let mut file = File::create(output_path).unwrap_or_else(|e| {
         eprintln!("Error creating {}: {}", output_path, e);
