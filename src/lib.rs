@@ -1,4 +1,5 @@
 pub mod bitwriter;
+pub mod cdf;
 pub mod frame;
 pub mod ivf;
 pub mod obu;
