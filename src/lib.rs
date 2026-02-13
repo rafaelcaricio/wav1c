@@ -16,7 +16,7 @@ pub fn encode_av1_ivf(y: u8, u: u8, v: u8) -> Vec<u8> {
         obu::ObuType::SequenceHeader,
         &sequence::encode_sequence_header(width, height),
     );
-    let frm = obu::obu_wrap(obu::ObuType::Frame, &frame::encode_frame(y, u, v));
+    let frm = obu::obu_wrap(obu::ObuType::Frame, &frame::encode_frame(width, height, y, u, v));
 
     let mut frame_data = Vec::new();
     frame_data.extend_from_slice(&td);
