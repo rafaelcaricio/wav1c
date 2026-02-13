@@ -31,14 +31,15 @@
 - Frame boundary clamping for all context arrays
 - Validated with gradient patterns at various dimensions
 
-## Phase 6: Multi-Frame Encoding (All-Intra) [NEXT]
+## Phase 6: Multi-Frame Encoding (All-Intra) [DONE]
 
-- Multiple frames (all keyframes)
-- Temporal delimiters between frames
-- IVF with correct frame count and timestamps
-- CLI: wav1c input.y4m -o output.ivf
+- Multi-frame Y4M parsing (all FRAME markers)
+- All-keyframe encoding (TD + SEQ + FRAME per frame)
+- IVF with correct frame count and sequential timestamps
+- CLI: wav1c input.y4m -o output.ivf (multi-frame)
+- Validated 3-frame and 5-frame sequences up to 320x240
 
-## Phase 7: Inter Prediction & GoP
+## Phase 7: Inter Prediction & GoP [NEXT]
 
 - Reference frame buffer management
 - ZERO_MV inter prediction (simplest inter mode)
