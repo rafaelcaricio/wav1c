@@ -15,15 +15,15 @@
 - Real tile encoding: partition, mode, DC coefficients
 - Any solid Y/U/V color, validated with dav1d (540+ combinations)
 
-## Phase 4: Arbitrary Frame Dimensions [NEXT]
+## Phase 4: Arbitrary Frame Dimensions [DONE]
 
-- Parameterize sequence/frame headers for any width/height
-- Multiple superblocks per frame (SB grid)
-- Handle partial superblocks at frame edges
-- Still solid-color per frame, but now at any resolution
-- Drop reduced_still_picture_header (need full headers for multi-frame later)
+- Full (non-reduced) sequence/frame headers, Level 5.1
+- Multi-SB tile encoder with recursive partition tree
+- Edge partition handling (forced splits at frame boundaries)
+- DC prediction context tracking across superblocks
+- Validated 1x1 to 1920x1080, including non-SB-aligned dimensions
 
-## Phase 5: Real Image Input (Single Intra Frame)
+## Phase 5: Real Image Input (Single Intra Frame) [NEXT]
 
 - Y4M input file parsing
 - Per-block DC prediction with neighbor context
