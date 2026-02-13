@@ -476,7 +476,14 @@ fn dav1d_decodes_multi_frame_varying() {
     let y4m_data = create_multi_frame_y4m(64, 64, &frame_fns);
     let frames = FramePixels::all_from_y4m(&y4m_data);
     let output = wav1c::encode_av1_ivf_multi(&frames);
-    let (success, stderr, _) = decode_to_y4m(&dav1d, &output, "multi_varying");
+    let solid_frames = vec![
+        FramePixels::solid(64, 64, 0, 128, 128),
+        FramePixels::solid(64, 64, 255, 128, 128),
+        FramePixels::solid(64, 64, 128, 128, 128),
+    ];
+    let solid_output = wav1c::encode_av1_ivf_multi(&solid_frames);
+    assert_eq!(output, solid_output, "IVF mismatch between y4m and solid");
+    let (success, stderr, _) = decode_to_y4m(&dav1d, &output, "multi_varying_v2");
     assert!(success, "dav1d failed for multi-frame varying: {}", stderr);
     assert!(
         stderr.contains("Decoded 3/3 frames"),
@@ -523,4 +530,74 @@ fn dav1d_decodes_multi_frame_gradient() {
         "Expected 5 decoded frames: {}",
         stderr
     );
+}
+
+#[test]
+fn dav1d_decodes_inter_small_residual() {
+    let Some(dav1d) = dav1d_path() else {
+        return;
+    };
+
+    let black: Box<dyn Fn(u32, u32) -> (u8, u8, u8)> = Box::new(|_col, _row| (0, 128, 128));
+    let white: Box<dyn Fn(u32, u32) -> (u8, u8, u8)> = Box::new(|_col, _row| (255, 128, 128));
+    let gray: Box<dyn Fn(u32, u32) -> (u8, u8, u8)> = Box::new(|_col, _row| (128, 128, 128));
+    let frame_fns: Vec<&dyn Fn(u32, u32) -> (u8, u8, u8)> = vec![&*black, &*white, &*gray];
+    let y4m_data = create_multi_frame_y4m(64, 64, &frame_fns);
+    let y4m_frames = FramePixels::all_from_y4m(&y4m_data);
+
+    let solid_frames = vec![
+        FramePixels::solid(64, 64, 0, 128, 128),
+        FramePixels::solid(64, 64, 255, 128, 128),
+        FramePixels::solid(64, 64, 128, 128, 128),
+    ];
+
+    for (i, (yf, sf)) in y4m_frames.iter().zip(solid_frames.iter()).enumerate() {
+        let y_eq = yf.y == sf.y;
+        let u_eq = yf.u == sf.u;
+        let v_eq = yf.v == sf.v;
+        eprintln!("Frame {}: y={} u={} v={} dim={}x{} vs {}x{}", i, y_eq, u_eq, v_eq, yf.width, yf.height, sf.width, sf.height);
+        if !y_eq {
+            for j in 0..yf.y.len().min(10) {
+                if yf.y[j] != sf.y[j] {
+                    eprintln!("  Y[{}]: y4m={} solid={}", j, yf.y[j], sf.y[j]);
+                }
+            }
+        }
+    }
+
+    let ivf_y4m = wav1c::encode_av1_ivf_multi(&y4m_frames);
+    let ivf_solid = wav1c::encode_av1_ivf_multi(&solid_frames);
+    eprintln!("IVF identical: {}", ivf_y4m == ivf_solid);
+
+    for y1 in 128u8..=140 {
+        let frames = vec![
+            FramePixels::solid(64, 64, 128, 128, 128),
+            FramePixels::solid(64, 64, y1, 128, 128),
+        ];
+        let ivf = wav1c::encode_av1_ivf_multi(&frames);
+        let (_, stderr, _) = decode_to_y4m(&dav1d, &ivf, &format!("2f_128_{}", y1));
+        let ok = stderr.contains("Decoded 2/2 frames");
+        eprintln!("Y={}: {}", y1, if ok { "OK" } else { "FAIL" });
+    }
+}
+
+#[test]
+fn dav1d_decodes_multi_sb_inter() {
+    let Some(dav1d) = dav1d_path() else {
+        return;
+    };
+
+    for (w, h) in [(128, 128), (128, 64), (64, 128), (192, 128), (320, 240)] {
+        let frames = vec![
+            FramePixels::solid(w, h, 128, 128, 128),
+            FramePixels::solid(w, h, 200, 100, 150),
+        ];
+        let ivf = wav1c::encode_av1_ivf_multi(&frames);
+        let (_, stderr, _) = decode_to_y4m(&dav1d, &ivf, &format!("msb_{}x{}", w, h));
+        let ok = stderr.contains("Decoded 2/2 frames");
+        eprintln!("{}x{}: {}", w, h, if ok { "OK" } else { "FAIL" });
+        if !ok {
+            eprintln!("  stderr: {}", stderr.lines().last().unwrap_or(""));
+        }
+    }
 }

@@ -24,16 +24,35 @@ pub fn encode_av1_ivf_multi(frames: &[y4m::FramePixels]) -> Vec<u8> {
     assert!((1..=4096).contains(&width), "width must be 1..=4096");
     assert!((1..=2304).contains(&height), "height must be 1..=2304");
 
+    let gop_size = 25usize;
     let mut output = Vec::new();
     ivf::write_ivf_header(&mut output, width as u16, height as u16, frames.len() as u32).unwrap();
 
+    let mut reference: Option<y4m::FramePixels> = None;
+
     for (i, pixels) in frames.iter().enumerate() {
+        let is_keyframe = i % gop_size == 0;
+
         let td = obu::obu_wrap(obu::ObuType::TemporalDelimiter, &[]);
         let seq = obu::obu_wrap(
             obu::ObuType::SequenceHeader,
             &sequence::encode_sequence_header(width, height),
         );
-        let frm = obu::obu_wrap(obu::ObuType::Frame, &frame::encode_frame(pixels));
+
+        let (frame_payload, recon) = if is_keyframe {
+            frame::encode_frame_with_recon(pixels)
+        } else {
+            frame::encode_inter_frame_with_recon(
+                pixels,
+                reference.as_ref().unwrap(),
+                0x01,
+                0,
+            )
+        };
+
+        reference = Some(recon);
+
+        let frm = obu::obu_wrap(obu::ObuType::Frame, &frame_payload);
 
         let mut frame_data = Vec::new();
         frame_data.extend_from_slice(&td);

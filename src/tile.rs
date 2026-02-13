@@ -260,6 +260,7 @@ struct TileEncoder<'a> {
     mi_cols: u32,
     mi_rows: u32,
     pixels: &'a FramePixels,
+    recon: FramePixels,
 }
 
 struct TileContext {
@@ -277,6 +278,8 @@ struct TileContext {
     left_lcoef: [u8; 32],
     above_ccoef: [Vec<u8>; 2],
     left_ccoef: [[u8; 16]; 2],
+    above_intra: Vec<bool>,
+    left_intra: [bool; 32],
 }
 
 impl TileContext {
@@ -286,6 +289,7 @@ impl TileContext {
         let above_recon_cols = (mi_cols as usize / 2) + 16;
         let above_coef_size = mi_cols as usize + 32;
         let above_ccoef_size = (mi_cols as usize / 2) + 16;
+        let above_inter_size = mi_cols as usize + 32;
         Self {
             above_partition: vec![0u8; above_part_size],
             above_skip: vec![0u8; above_skip_size],
@@ -299,8 +303,13 @@ impl TileContext {
             left_recon_v: [128u8; 8],
             above_lcoef: vec![0x40u8; above_coef_size],
             left_lcoef: [0x40u8; 32],
-            above_ccoef: [vec![0x40u8; above_ccoef_size], vec![0x40u8; above_ccoef_size]],
+            above_ccoef: [
+                vec![0x40u8; above_ccoef_size],
+                vec![0x40u8; above_ccoef_size],
+            ],
             left_ccoef: [[0x40u8; 16]; 2],
+            above_intra: vec![false; above_inter_size],
+            left_intra: [false; 32],
         }
     }
 
@@ -312,6 +321,7 @@ impl TileContext {
         self.left_recon_v = [128u8; 8];
         self.left_lcoef = [0x40u8; 32];
         self.left_ccoef = [[0x40u8; 16]; 2];
+        self.left_intra = [false; 32];
     }
 
     fn partition_ctx(&self, bx: u32, by: u32, bl: usize) -> usize {
@@ -348,7 +358,15 @@ impl TileContext {
         }
     }
 
-    fn update_skip_ctx(&mut self, bx: u32, by: u32, bl: usize, mi_cols: u32, mi_rows: u32, is_skip: bool) {
+    fn update_skip_ctx(
+        &mut self,
+        bx: u32,
+        by: u32,
+        bl: usize,
+        mi_cols: u32,
+        mi_rows: u32,
+        is_skip: bool,
+    ) {
         let bx4 = bx as usize;
         let by4 = (by & 31) as usize;
         let bw4 = 2 * (16usize >> bl);
@@ -378,7 +396,14 @@ impl TileContext {
             let bx4 = (bx / 2) as usize;
             let by4 = ((by & 31) / 2) as usize;
             let n = (16usize >> bl).max(1);
-            (&self.above_ccoef[pl][..], &self.left_ccoef[pl][..], bx4, by4, n, n)
+            (
+                &self.above_ccoef[pl][..],
+                &self.left_ccoef[pl][..],
+                bx4,
+                by4,
+                n,
+                n,
+            )
         };
 
         let mut sum = 0i32;
@@ -605,12 +630,109 @@ impl TileContext {
             }
         }
     }
+
+    fn ref_ctx(&self, bx: u32, by: u32) -> usize {
+        let bx4 = bx as usize;
+        let by4 = (by & 31) as usize;
+        let have_top = by > 0;
+        let have_left = bx > 0;
+
+        let above_inter = have_top
+            && bx4 < self.above_intra.len()
+            && !self.above_intra[bx4];
+        let left_inter = have_left && !self.left_intra[by4.min(31)];
+
+        if above_inter || left_inter {
+            2
+        } else {
+            1
+        }
+    }
+
+    fn newmv_ctx(&self, bx: u32, by: u32) -> usize {
+        let bx4 = bx as usize;
+        let by4 = (by & 31) as usize;
+        let have_top = by > 0;
+        let have_left = bx > 0;
+
+        let above_inter = have_top
+            && bx4 < self.above_intra.len()
+            && !self.above_intra[bx4];
+        let left_inter = have_left && !self.left_intra[by4.min(31)];
+
+        let nearest_match = above_inter as u32 + left_inter as u32;
+        match nearest_match {
+            0 => 0,
+            1 => 3,
+            2 => 5,
+            _ => unreachable!(),
+        }
+    }
+
+    fn is_inter_ctx(&self, bx: u32, by: u32) -> usize {
+        let bx4 = bx as usize;
+        let by4 = (by & 31) as usize;
+        let have_top = by > 0;
+        let have_left = bx > 0;
+
+        if have_left {
+            if have_top {
+                let l = self.left_intra[by4.min(31)] as usize;
+                let a = if bx4 < self.above_intra.len() {
+                    self.above_intra[bx4] as usize
+                } else {
+                    0
+                };
+                let ctx = l + a;
+                ctx + usize::from(ctx == 2)
+            } else {
+                (self.left_intra[by4.min(31)] as usize) * 2
+            }
+        } else if have_top {
+            let a = if bx4 < self.above_intra.len() {
+                self.above_intra[bx4] as usize
+            } else {
+                0
+            };
+            a * 2
+        } else {
+            0
+        }
+    }
+
+    fn update_intra_ctx(
+        &mut self,
+        bx: u32,
+        by: u32,
+        bl: usize,
+        mi_cols: u32,
+        mi_rows: u32,
+        is_intra: bool,
+    ) {
+        let bx4 = bx as usize;
+        let by4 = (by & 31) as usize;
+        let bw4 = 2 * (16usize >> bl);
+        let aw = min(bw4, (mi_cols - bx) as usize);
+        let lh = min(bw4, (mi_rows - by) as usize);
+        for i in 0..aw {
+            if bx4 + i < self.above_intra.len() {
+                self.above_intra[bx4 + i] = is_intra;
+            }
+        }
+        for i in 0..lh {
+            if by4 + i < 32 {
+                self.left_intra[by4 + i] = is_intra;
+            }
+        }
+    }
 }
 
 impl<'a> TileEncoder<'a> {
     fn new(pixels: &'a FramePixels) -> Self {
         let mi_cols = 2 * pixels.width.div_ceil(8);
         let mi_rows = 2 * pixels.height.div_ceil(8);
+        let cw = pixels.width.div_ceil(2);
+        let ch = pixels.height.div_ceil(2);
         Self {
             enc: MsacEncoder::new(),
             cdf: CdfContext::default(),
@@ -618,6 +740,43 @@ impl<'a> TileEncoder<'a> {
             mi_cols,
             mi_rows,
             pixels,
+            recon: FramePixels {
+                width: pixels.width,
+                height: pixels.height,
+                y: vec![128u8; (pixels.width * pixels.height) as usize],
+                u: vec![128u8; (cw * ch) as usize],
+                v: vec![128u8; (cw * ch) as usize],
+            },
+        }
+    }
+
+    fn fill_recon(&mut self, bx: u32, by: u32, bl: usize, recon_y: u8, recon_u: u8, recon_v: u8) {
+        let luma_px = 128u32 >> bl;
+        let chroma_px = luma_px / 2;
+        let px_x = bx * 4;
+        let px_y = by * 4;
+        let w = self.recon.width;
+        let h = self.recon.height;
+        let cw = w.div_ceil(2);
+        let ch = h.div_ceil(2);
+
+        let x_end = min(px_x + luma_px, w);
+        let y_end = min(px_y + luma_px, h);
+        for row in px_y..y_end {
+            let start = (row * w + px_x) as usize;
+            let end = (row * w + x_end) as usize;
+            self.recon.y[start..end].fill(recon_y);
+        }
+
+        let cpx_x = px_x / 2;
+        let cpx_y = px_y / 2;
+        let cx_end = min(cpx_x + chroma_px, cw);
+        let cy_end = min(cpx_y + chroma_px, ch);
+        for row in cpx_y..cy_end {
+            let start = (row * cw + cpx_x) as usize;
+            let end = (row * cw + cx_end) as usize;
+            self.recon.u[start..end].fill(recon_u);
+            self.recon.v[start..end].fill(recon_v);
         }
     }
 
@@ -666,17 +825,24 @@ impl<'a> TileEncoder<'a> {
 
         let (y_tok, y_neg) =
             compute_dc_tok(y_avg, y_pred, params.luma_dq_shift, params.luma_itx_shift);
-        let (u_tok, u_neg) =
-            compute_dc_tok(u_avg, u_pred, params.chroma_dq_shift, params.chroma_itx_shift);
-        let (v_tok, v_neg) =
-            compute_dc_tok(v_avg, v_pred, params.chroma_dq_shift, params.chroma_itx_shift);
+        let (u_tok, u_neg) = compute_dc_tok(
+            u_avg,
+            u_pred,
+            params.chroma_dq_shift,
+            params.chroma_itx_shift,
+        );
+        let (v_tok, v_neg) = compute_dc_tok(
+            v_avg,
+            v_pred,
+            params.chroma_dq_shift,
+            params.chroma_itx_shift,
+        );
         let is_skip = y_tok == 0 && u_tok == 0 && v_tok == 0;
 
         let skip_ctx = self.ctx.skip_ctx(bx, by);
         self.enc.encode_bool(is_skip, &mut self.cdf.skip[skip_ctx]);
 
-        self.enc
-            .encode_symbol(0, &mut self.cdf.kf_y_mode[0][0], 12);
+        self.enc.encode_symbol(0, &mut self.cdf.kf_y_mode[0][0], 12);
 
         let cfl_allowed = bl >= 2;
         let uv_n_syms = if cfl_allowed { 13 } else { 12 };
@@ -704,8 +870,10 @@ impl<'a> TileEncoder<'a> {
                     y_dc_sign_ctx,
                 );
             } else {
-                self.enc
-                    .encode_bool(true, &mut self.cdf.txb_skip[params.luma_t_dim_ctx][y_txb_skip_ctx]);
+                self.enc.encode_bool(
+                    true,
+                    &mut self.cdf.txb_skip[params.luma_t_dim_ctx][y_txb_skip_ctx],
+                );
             }
 
             let u_txb_skip_ctx = self.ctx.chroma_txb_skip_ctx(bx, by, bl, 1);
@@ -724,8 +892,10 @@ impl<'a> TileEncoder<'a> {
                     u_dc_sign_ctx,
                 );
             } else {
-                self.enc
-                    .encode_bool(true, &mut self.cdf.txb_skip[params.chroma_t_dim_ctx][u_txb_skip_ctx]);
+                self.enc.encode_bool(
+                    true,
+                    &mut self.cdf.txb_skip[params.chroma_t_dim_ctx][u_txb_skip_ctx],
+                );
             }
 
             let v_txb_skip_ctx = self.ctx.chroma_txb_skip_ctx(bx, by, bl, 2);
@@ -744,8 +914,10 @@ impl<'a> TileEncoder<'a> {
                     v_dc_sign_ctx,
                 );
             } else {
-                self.enc
-                    .encode_bool(true, &mut self.cdf.txb_skip[params.chroma_t_dim_ctx][v_txb_skip_ctx]);
+                self.enc.encode_bool(
+                    true,
+                    &mut self.cdf.txb_skip[params.chroma_t_dim_ctx][v_txb_skip_ctx],
+                );
             }
         }
 
@@ -771,10 +943,34 @@ impl<'a> TileEncoder<'a> {
             params.chroma_itx_shift,
         );
 
-        self.ctx.update_recon(bx, by, bl, self.mi_cols, self.mi_rows, recon_y, recon_u, recon_v);
-        self.ctx.update_coef_ctx(bx, by, bl, self.mi_cols, self.mi_rows, y_tok, y_neg, u_tok, u_neg, v_tok, v_neg);
-        self.ctx.update_partition_ctx(bx, by, bl, self.mi_cols, self.mi_rows);
-        self.ctx.update_skip_ctx(bx, by, bl, self.mi_cols, self.mi_rows, is_skip);
+        self.ctx.update_recon(
+            bx,
+            by,
+            bl,
+            self.mi_cols,
+            self.mi_rows,
+            recon_y,
+            recon_u,
+            recon_v,
+        );
+        self.fill_recon(bx, by, bl, recon_y, recon_u, recon_v);
+        self.ctx.update_coef_ctx(
+            bx,
+            by,
+            bl,
+            self.mi_cols,
+            self.mi_rows,
+            y_tok,
+            y_neg,
+            u_tok,
+            u_neg,
+            v_tok,
+            v_neg,
+        );
+        self.ctx
+            .update_partition_ctx(bx, by, bl, self.mi_cols, self.mi_rows);
+        self.ctx
+            .update_skip_ctx(bx, by, bl, self.mi_cols, self.mi_rows, is_skip);
     }
 
     fn encode_partition(&mut self, bl: usize, bx: u32, by: u32) {
@@ -815,6 +1011,10 @@ impl<'a> TileEncoder<'a> {
 }
 
 pub fn encode_tile(pixels: &FramePixels) -> Vec<u8> {
+    encode_tile_with_recon(pixels).0
+}
+
+pub fn encode_tile_with_recon(pixels: &FramePixels) -> (Vec<u8>, FramePixels) {
     let mut tile = TileEncoder::new(pixels);
 
     let sb_cols = tile.mi_cols.div_ceil(16);
@@ -829,7 +1029,369 @@ pub fn encode_tile(pixels: &FramePixels) -> Vec<u8> {
         }
     }
 
-    tile.enc.finalize()
+    (tile.enc.finalize(), tile.recon)
+}
+
+struct InterTileEncoder<'a> {
+    enc: MsacEncoder,
+    cdf: CdfContext,
+    ctx: TileContext,
+    mi_cols: u32,
+    mi_rows: u32,
+    pixels: &'a FramePixels,
+    reference: &'a FramePixels,
+    recon: FramePixels,
+}
+
+impl<'a> InterTileEncoder<'a> {
+    fn new(pixels: &'a FramePixels, reference: &'a FramePixels) -> Self {
+        let mi_cols = 2 * pixels.width.div_ceil(8);
+        let mi_rows = 2 * pixels.height.div_ceil(8);
+        let cw = pixels.width.div_ceil(2);
+        let ch = pixels.height.div_ceil(2);
+        let mut enc = MsacEncoder::new();
+        enc.allow_update_cdf = false;
+        Self {
+            enc,
+            cdf: CdfContext::default(),
+            ctx: TileContext::new(mi_cols),
+            mi_cols,
+            mi_rows,
+            pixels,
+            reference,
+            recon: FramePixels {
+                width: pixels.width,
+                height: pixels.height,
+                y: vec![128u8; (pixels.width * pixels.height) as usize],
+                u: vec![128u8; (cw * ch) as usize],
+                v: vec![128u8; (cw * ch) as usize],
+            },
+        }
+    }
+
+    fn fill_recon(&mut self, bx: u32, by: u32, bl: usize, recon_y: u8, recon_u: u8, recon_v: u8) {
+        let luma_px = 128u32 >> bl;
+        let chroma_px = luma_px / 2;
+        let px_x = bx * 4;
+        let px_y = by * 4;
+        let w = self.recon.width;
+        let h = self.recon.height;
+        let cw = w.div_ceil(2);
+        let ch = h.div_ceil(2);
+
+        let x_end = min(px_x + luma_px, w);
+        let y_end = min(px_y + luma_px, h);
+        for row in px_y..y_end {
+            let start = (row * w + px_x) as usize;
+            let end = (row * w + x_end) as usize;
+            self.recon.y[start..end].fill(recon_y);
+        }
+
+        let cpx_x = px_x / 2;
+        let cpx_y = px_y / 2;
+        let cx_end = min(cpx_x + chroma_px, cw);
+        let cy_end = min(cpx_y + chroma_px, ch);
+        for row in cpx_y..cy_end {
+            let start = (row * cw + cpx_x) as usize;
+            let end = (row * cw + cx_end) as usize;
+            self.recon.u[start..end].fill(recon_u);
+            self.recon.v[start..end].fill(recon_v);
+        }
+    }
+
+    fn encode_inter_block(&mut self, bx: u32, by: u32, bl: usize) {
+        let params = &BLOCK_PARAMS[bl];
+        let luma_px = 128u32 >> bl;
+        let chroma_px = luma_px / 2;
+        let px_x = bx * 4;
+        let px_y = by * 4;
+        let chroma_px_x = px_x / 2;
+        let chroma_px_y = px_y / 2;
+        let chroma_w = self.pixels.width.div_ceil(2);
+        let chroma_h = self.pixels.height.div_ceil(2);
+
+        let y_avg = block_average(
+            &self.pixels.y,
+            self.pixels.width,
+            px_x,
+            px_y,
+            luma_px,
+            self.pixels.width,
+            self.pixels.height,
+        );
+        let u_avg = block_average(
+            &self.pixels.u,
+            chroma_w,
+            chroma_px_x,
+            chroma_px_y,
+            chroma_px,
+            chroma_w,
+            chroma_h,
+        );
+        let v_avg = block_average(
+            &self.pixels.v,
+            chroma_w,
+            chroma_px_x,
+            chroma_px_y,
+            chroma_px,
+            chroma_w,
+            chroma_h,
+        );
+
+        let y_ref = block_average(
+            &self.reference.y,
+            self.reference.width,
+            px_x,
+            px_y,
+            luma_px,
+            self.reference.width,
+            self.reference.height,
+        );
+        let u_ref = block_average(
+            &self.reference.u,
+            chroma_w,
+            chroma_px_x,
+            chroma_px_y,
+            chroma_px,
+            chroma_w,
+            chroma_h,
+        );
+        let v_ref = block_average(
+            &self.reference.v,
+            chroma_w,
+            chroma_px_x,
+            chroma_px_y,
+            chroma_px,
+            chroma_w,
+            chroma_h,
+        );
+
+        let (y_tok, y_neg) =
+            compute_dc_tok(y_avg, y_ref, params.luma_dq_shift, params.luma_itx_shift);
+        let (u_tok, u_neg) = compute_dc_tok(
+            u_avg,
+            u_ref,
+            params.chroma_dq_shift,
+            params.chroma_itx_shift,
+        );
+        let (v_tok, v_neg) = compute_dc_tok(
+            v_avg,
+            v_ref,
+            params.chroma_dq_shift,
+            params.chroma_itx_shift,
+        );
+        let is_skip = y_tok == 0 && u_tok == 0 && v_tok == 0;
+
+        let skip_ctx = self.ctx.skip_ctx(bx, by);
+        self.enc.encode_bool(is_skip, &mut self.cdf.skip[skip_ctx]);
+
+        let is_inter_ctx = self.ctx.is_inter_ctx(bx, by);
+        self.enc
+            .encode_bool(true, &mut self.cdf.is_inter[is_inter_ctx]);
+
+        let ref_ctx = self.ctx.ref_ctx(bx, by);
+        self.enc
+            .encode_bool(false, &mut self.cdf.single_ref[ref_ctx][0]);
+        self.enc
+            .encode_bool(false, &mut self.cdf.single_ref[ref_ctx][2]);
+        self.enc
+            .encode_bool(false, &mut self.cdf.single_ref[ref_ctx][3]);
+
+        let newmv_ctx = self.ctx.newmv_ctx(bx, by);
+        self.enc.encode_bool(true, &mut self.cdf.newmv[newmv_ctx]);
+
+        let zeromv_ctx = 0usize;
+        self.enc
+            .encode_bool(false, &mut self.cdf.zeromv[zeromv_ctx]);
+
+        if !is_skip {
+            let l_eob = luma_eob_bin(bl);
+            let c_eob = chroma_eob_bin(bl);
+
+            let y_txb_skip_ctx = 0;
+            let y_dc_sign_ctx = self.ctx.dc_sign_ctx(bx, by, bl, 0);
+
+            if y_tok > 0 {
+                encode_plane_coeffs(
+                    &mut self.enc,
+                    &mut self.cdf,
+                    y_tok,
+                    y_neg,
+                    false,
+                    params.luma_t_dim_ctx,
+                    l_eob,
+                    y_txb_skip_ctx,
+                    y_dc_sign_ctx,
+                );
+            } else {
+                self.enc.encode_bool(
+                    true,
+                    &mut self.cdf.txb_skip[params.luma_t_dim_ctx][y_txb_skip_ctx],
+                );
+            }
+
+            let u_txb_skip_ctx = self.ctx.chroma_txb_skip_ctx(bx, by, bl, 1);
+            let u_dc_sign_ctx = self.ctx.dc_sign_ctx(bx, by, bl, 1);
+
+            if u_tok > 0 {
+                encode_plane_coeffs(
+                    &mut self.enc,
+                    &mut self.cdf,
+                    u_tok,
+                    u_neg,
+                    true,
+                    params.chroma_t_dim_ctx,
+                    c_eob,
+                    u_txb_skip_ctx,
+                    u_dc_sign_ctx,
+                );
+            } else {
+                self.enc.encode_bool(
+                    true,
+                    &mut self.cdf.txb_skip[params.chroma_t_dim_ctx][u_txb_skip_ctx],
+                );
+            }
+
+            let v_txb_skip_ctx = self.ctx.chroma_txb_skip_ctx(bx, by, bl, 2);
+            let v_dc_sign_ctx = self.ctx.dc_sign_ctx(bx, by, bl, 2);
+
+            if v_tok > 0 {
+                encode_plane_coeffs(
+                    &mut self.enc,
+                    &mut self.cdf,
+                    v_tok,
+                    v_neg,
+                    true,
+                    params.chroma_t_dim_ctx,
+                    c_eob,
+                    v_txb_skip_ctx,
+                    v_dc_sign_ctx,
+                );
+            } else {
+                self.enc.encode_bool(
+                    true,
+                    &mut self.cdf.txb_skip[params.chroma_t_dim_ctx][v_txb_skip_ctx],
+                );
+            }
+        }
+
+        let recon_y = compute_reconstructed_dc(
+            y_ref,
+            y_tok,
+            y_neg,
+            params.luma_dq_shift,
+            params.luma_itx_shift,
+        );
+        let recon_u = compute_reconstructed_dc(
+            u_ref,
+            u_tok,
+            u_neg,
+            params.chroma_dq_shift,
+            params.chroma_itx_shift,
+        );
+        let recon_v = compute_reconstructed_dc(
+            v_ref,
+            v_tok,
+            v_neg,
+            params.chroma_dq_shift,
+            params.chroma_itx_shift,
+        );
+
+        self.ctx.update_recon(
+            bx,
+            by,
+            bl,
+            self.mi_cols,
+            self.mi_rows,
+            recon_y,
+            recon_u,
+            recon_v,
+        );
+        self.fill_recon(bx, by, bl, recon_y, recon_u, recon_v);
+        self.ctx.update_coef_ctx(
+            bx,
+            by,
+            bl,
+            self.mi_cols,
+            self.mi_rows,
+            y_tok,
+            y_neg,
+            u_tok,
+            u_neg,
+            v_tok,
+            v_neg,
+        );
+        self.ctx
+            .update_partition_ctx(bx, by, bl, self.mi_cols, self.mi_rows);
+        self.ctx
+            .update_skip_ctx(bx, by, bl, self.mi_cols, self.mi_rows, is_skip);
+        self.ctx
+            .update_intra_ctx(bx, by, bl, self.mi_cols, self.mi_rows, false);
+    }
+
+    fn encode_inter_partition(&mut self, bl: usize, bx: u32, by: u32) {
+        if bl > 4 {
+            return;
+        }
+
+        let hsz = 16u32 >> bl;
+        let have_h_split = self.mi_cols > bx + hsz;
+        let have_v_split = self.mi_rows > by + hsz;
+
+        if have_h_split && have_v_split {
+            let part_ctx = self.ctx.partition_ctx(bx, by, bl);
+            self.enc.encode_symbol(
+                0,
+                &mut self.cdf.partition[bl][part_ctx],
+                PARTITION_NSYMS[bl],
+            );
+            self.encode_inter_block(bx, by, bl);
+        } else if have_h_split {
+            let part_ctx = self.ctx.partition_ctx(bx, by, bl);
+            let prob = gather_top_partition_prob(&self.cdf.partition[bl][part_ctx], bl);
+            self.enc.encode_bool_prob(true, prob);
+
+            self.encode_inter_partition(bl + 1, bx, by);
+            self.encode_inter_partition(bl + 1, bx + hsz, by);
+        } else if have_v_split {
+            let part_ctx = self.ctx.partition_ctx(bx, by, bl);
+            let prob = gather_left_partition_prob(&self.cdf.partition[bl][part_ctx], bl);
+            self.enc.encode_bool_prob(true, prob);
+
+            self.encode_inter_partition(bl + 1, bx, by);
+            self.encode_inter_partition(bl + 1, bx, by + hsz);
+        } else {
+            self.encode_inter_partition(bl + 1, bx, by);
+        }
+    }
+}
+
+pub fn encode_inter_tile(pixels: &FramePixels, reference: &FramePixels) -> Vec<u8> {
+    encode_inter_tile_with_recon(pixels, reference).0
+}
+
+pub fn encode_inter_tile_with_recon(
+    pixels: &FramePixels,
+    reference: &FramePixels,
+) -> (Vec<u8>, FramePixels) {
+    assert_eq!(pixels.width, reference.width, "reference frame width mismatch");
+    assert_eq!(pixels.height, reference.height, "reference frame height mismatch");
+    let mut tile = InterTileEncoder::new(pixels, reference);
+
+    let sb_cols = tile.mi_cols.div_ceil(16);
+    let sb_rows = tile.mi_rows.div_ceil(16);
+
+    for sb_row in 0..sb_rows {
+        tile.ctx.reset_left_for_sb_row();
+        for sb_col in 0..sb_cols {
+            let bx = sb_col * 16;
+            let by = sb_row * 16;
+            tile.encode_inter_partition(1, bx, by);
+        }
+    }
+
+    let tile_bytes = tile.enc.finalize();
+    (tile_bytes, tile.recon)
 }
 
 #[cfg(test)]
@@ -948,14 +1510,18 @@ mod tests {
 
     #[test]
     fn gather_top_partition_prob_returns_valid() {
-        let pc = [12631u16, 11221, 9690, 3202, 2931, 2507, 2244, 1876, 1044, 0, 0, 0, 0, 0, 0, 0];
+        let pc = [
+            12631u16, 11221, 9690, 3202, 2931, 2507, 2244, 1876, 1044, 0, 0, 0, 0, 0, 0, 0,
+        ];
         let prob = gather_top_partition_prob(&pc, 1);
         assert!(prob > 0);
     }
 
     #[test]
     fn gather_left_partition_prob_returns_valid() {
-        let pc = [12631u16, 11221, 9690, 3202, 2931, 2507, 2244, 1876, 1044, 0, 0, 0, 0, 0, 0, 0];
+        let pc = [
+            12631u16, 11221, 9690, 3202, 2931, 2507, 2244, 1876, 1044, 0, 0, 0, 0, 0, 0, 0,
+        ];
         let prob = gather_left_partition_prob(&pc, 1);
         assert!(prob > 0);
     }
@@ -1052,6 +1618,179 @@ mod tests {
             }
         }
         let bytes = encode_tile(&pixels);
+        assert!(!bytes.is_empty());
+    }
+
+    fn encode_inter_tile_solid(
+        width: u32,
+        height: u32,
+        y: u8,
+        u: u8,
+        v: u8,
+        ry: u8,
+        ru: u8,
+        rv: u8,
+    ) -> Vec<u8> {
+        let pixels = FramePixels::solid(width, height, y, u, v);
+        let reference = FramePixels::solid(width, height, ry, ru, rv);
+        encode_inter_tile(&pixels, &reference)
+    }
+
+    #[test]
+    fn inter_tile_64x64_produces_bytes() {
+        let bytes = encode_inter_tile_solid(64, 64, 128, 128, 128, 128, 128, 128);
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn inter_tile_128x128_produces_bytes() {
+        let bytes = encode_inter_tile_solid(128, 128, 128, 128, 128, 128, 128, 128);
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn inter_tile_100x100_produces_bytes() {
+        let bytes = encode_inter_tile_solid(100, 100, 64, 128, 128, 128, 128, 128);
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn inter_tile_320x240_produces_bytes() {
+        let bytes = encode_inter_tile_solid(320, 240, 0, 128, 128, 128, 128, 128);
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn inter_tile_same_as_reference_is_small() {
+        let same = encode_inter_tile_solid(64, 64, 128, 128, 128, 128, 128, 128);
+        let diff = encode_inter_tile_solid(64, 64, 0, 0, 0, 255, 255, 255);
+        assert!(diff.len() > same.len());
+    }
+
+    #[test]
+    fn inter_tile_differs_from_intra_tile() {
+        let intra = encode_tile_solid(64, 64, 128, 128, 128);
+        let inter = encode_inter_tile_solid(64, 64, 128, 128, 128, 128, 128, 128);
+        assert_ne!(intra, inter);
+    }
+
+    #[test]
+    fn inter_tile_different_reference_produces_different_output() {
+        let a = encode_inter_tile_solid(64, 64, 128, 128, 128, 0, 0, 0);
+        let b = encode_inter_tile_solid(64, 64, 128, 128, 128, 255, 255, 255);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn inter_tile_8x8_produces_bytes() {
+        let bytes = encode_inter_tile_solid(8, 8, 128, 128, 128, 100, 100, 100);
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn inter_tile_odd_dimensions() {
+        let bytes = encode_inter_tile_solid(17, 33, 100, 128, 128, 50, 128, 128);
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn inter_tile_wide_frame() {
+        let bytes = encode_inter_tile_solid(256, 64, 128, 128, 128, 128, 128, 128);
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn inter_tile_tall_frame() {
+        let bytes = encode_inter_tile_solid(64, 256, 128, 128, 128, 128, 128, 128);
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn is_inter_ctx_no_neighbors() {
+        let ctx = TileContext::new(32);
+        assert_eq!(ctx.is_inter_ctx(0, 0), 0);
+    }
+
+    #[test]
+    fn is_inter_ctx_both_intra_neighbors() {
+        let mut ctx = TileContext::new(32);
+        ctx.above_intra[2] = true;
+        ctx.left_intra[2] = true;
+        assert_eq!(ctx.is_inter_ctx(2, 2), 3);
+    }
+
+    #[test]
+    fn is_inter_ctx_both_inter_neighbors() {
+        let mut ctx = TileContext::new(32);
+        ctx.above_intra[2] = false;
+        ctx.left_intra[2] = false;
+        assert_eq!(ctx.is_inter_ctx(2, 2), 0);
+    }
+
+    #[test]
+    fn is_inter_ctx_one_intra_neighbor() {
+        let mut ctx = TileContext::new(32);
+        ctx.above_intra[2] = true;
+        ctx.left_intra[2] = false;
+        assert_eq!(ctx.is_inter_ctx(2, 2), 1);
+    }
+
+    #[test]
+    fn is_inter_ctx_top_only_inter() {
+        let ctx = TileContext::new(32);
+        assert_eq!(ctx.is_inter_ctx(0, 2), 0);
+    }
+
+    #[test]
+    fn is_inter_ctx_top_only_intra() {
+        let mut ctx = TileContext::new(32);
+        ctx.above_intra[0] = true;
+        assert_eq!(ctx.is_inter_ctx(0, 2), 2);
+    }
+
+    #[test]
+    fn newmv_ctx_no_neighbors() {
+        let ctx = TileContext::new(32);
+        assert_eq!(ctx.newmv_ctx(0, 0), 0);
+    }
+
+    #[test]
+    fn newmv_ctx_left_only() {
+        let mut ctx = TileContext::new(32);
+        ctx.above_intra[16] = false;
+        ctx.left_intra[0] = false;
+        assert_eq!(ctx.newmv_ctx(16, 0), 3);
+    }
+
+    #[test]
+    fn newmv_ctx_top_only() {
+        let ctx = TileContext::new(32);
+        assert_eq!(ctx.newmv_ctx(0, 16), 3);
+    }
+
+    #[test]
+    fn newmv_ctx_both_neighbors() {
+        let ctx = TileContext::new(64);
+        assert_eq!(ctx.newmv_ctx(16, 16), 5);
+    }
+
+    #[test]
+    fn newmv_ctx_intra_neighbor_not_counted() {
+        let mut ctx = TileContext::new(64);
+        ctx.above_intra[16] = true;
+        assert_eq!(ctx.newmv_ctx(16, 16), 3);
+    }
+
+    #[test]
+    fn inter_tile_with_gradient() {
+        let mut pixels = FramePixels::solid(64, 64, 128, 128, 128);
+        for row in 0..64u32 {
+            for col in 0..64u32 {
+                pixels.y[(row * 64 + col) as usize] = ((row * 4) as u8).min(255);
+            }
+        }
+        let reference = FramePixels::solid(64, 64, 128, 128, 128);
+        let bytes = encode_inter_tile(&pixels, &reference);
         assert!(!bytes.is_empty());
     }
 }

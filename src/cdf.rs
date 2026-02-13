@@ -529,6 +529,46 @@ pub const DEFAULT_DC_SIGN_CDF: [[[u16; 4]; 3]; 2] =
         ],
     ];
 
+#[rustfmt::skip]
+pub const DEFAULT_IS_INTER_CDF: [[u16; 4]; 4] = [
+    [31962, 0, 0, 0],
+    [16106, 0, 0, 0],
+    [12582, 0, 0, 0],
+    [6230, 0, 0, 0],
+];
+
+#[rustfmt::skip]
+pub const DEFAULT_NEWMV_CDF: [[u16; 4]; 6] = [
+    [8733, 0, 0, 0],
+    [16138, 0, 0, 0],
+    [17429, 0, 0, 0],
+    [24382, 0, 0, 0],
+    [20546, 0, 0, 0],
+    [28092, 0, 0, 0],
+];
+
+#[rustfmt::skip]
+pub const DEFAULT_ZEROMV_CDF: [[u16; 4]; 2] = [
+    [30593, 0, 0, 0],
+    [31714, 0, 0, 0],
+];
+
+#[rustfmt::skip]
+pub const DEFAULT_SINGLE_REF_CDF: [[[u16; 4]; 6]; 3] = [
+    [
+        [27871, 0, 0, 0], [31213, 0, 0, 0], [28532, 0, 0, 0],
+        [24118, 0, 0, 0], [31864, 0, 0, 0], [31324, 0, 0, 0],
+    ],
+    [
+        [15795, 0, 0, 0], [16017, 0, 0, 0], [13121, 0, 0, 0],
+        [7995, 0, 0, 0], [21754, 0, 0, 0], [17681, 0, 0, 0],
+    ],
+    [
+        [3024, 0, 0, 0], [2489, 0, 0, 0], [1574, 0, 0, 0],
+        [873, 0, 0, 0], [5893, 0, 0, 0], [2464, 0, 0, 0],
+    ],
+];
+
 pub struct CdfContext {
     pub kf_y_mode: [[[u16; 16]; 5]; 5],
     pub uv_mode: [[[u16; 16]; 13]; 2],
@@ -542,6 +582,10 @@ pub struct CdfContext {
     pub eob_base_tok: [[[[u16; 4]; 4]; 2]; 5],
     pub br_tok: [[[[u16; 4]; 21]; 2]; 4],
     pub dc_sign: [[[u16; 4]; 3]; 2],
+    pub is_inter: [[u16; 4]; 4],
+    pub newmv: [[u16; 4]; 6],
+    pub zeromv: [[u16; 4]; 2],
+    pub single_ref: [[[u16; 4]; 6]; 3],
 }
 
 impl Default for CdfContext {
@@ -559,6 +603,10 @@ impl Default for CdfContext {
             eob_base_tok: DEFAULT_EOB_BASE_TOK_CDF,
             br_tok: DEFAULT_BR_TOK_CDF,
             dc_sign: DEFAULT_DC_SIGN_CDF,
+            is_inter: DEFAULT_IS_INTER_CDF,
+            newmv: DEFAULT_NEWMV_CDF,
+            zeromv: DEFAULT_ZEROMV_CDF,
+            single_ref: DEFAULT_SINGLE_REF_CDF,
         }
     }
 }
