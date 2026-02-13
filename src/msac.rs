@@ -91,6 +91,13 @@ impl MsacEncoder {
         }
     }
 
+    pub fn encode_bool_prob(&mut self, val: bool, prob: u16) {
+        let nms = if val { 1u16 } else { 2u16 };
+        let fl = if val { prob } else { 32768 };
+        let fh = if val { 0 } else { prob };
+        self.store(fl, fh, nms);
+    }
+
     pub fn encode_bool_equi(&mut self, val: bool) {
         let r = self.rng as u32;
         let v = (((r >> 8) << 7) + EC_MIN_PROB) as u16;

@@ -7,9 +7,9 @@ pub mod obu;
 pub mod sequence;
 pub mod tile;
 
-pub fn encode_av1_ivf(y: u8, u: u8, v: u8) -> Vec<u8> {
-    let width: u32 = 64;
-    let height: u32 = 64;
+pub fn encode_av1_ivf(width: u32, height: u32, y: u8, u: u8, v: u8) -> Vec<u8> {
+    assert!((1..=4096).contains(&width), "width must be 1..=4096");
+    assert!((1..=2304).contains(&height), "height must be 1..=2304");
 
     let td = obu::obu_wrap(obu::ObuType::TemporalDelimiter, &[]);
     let seq = obu::obu_wrap(
@@ -35,7 +35,7 @@ mod tests {
 
     #[test]
     fn output_starts_with_valid_obu_structure() {
-        let output = encode_av1_ivf(128, 128, 128);
+        let output = encode_av1_ivf(64, 64, 128, 128, 128);
         let frame_data = &output[44..];
         let temporal_delimiter_header = 0x12;
         let temporal_delimiter_size = 0x00;
@@ -56,8 +56,15 @@ mod tests {
 
     #[test]
     fn different_colors_produce_different_output() {
-        let gray = encode_av1_ivf(128, 128, 128);
-        let black = encode_av1_ivf(0, 0, 0);
+        let gray = encode_av1_ivf(64, 64, 128, 128, 128);
+        let black = encode_av1_ivf(64, 64, 0, 0, 0);
         assert_ne!(gray, black);
+    }
+
+    #[test]
+    fn different_dimensions_produce_different_output() {
+        let small = encode_av1_ivf(64, 64, 128, 128, 128);
+        let large = encode_av1_ivf(128, 128, 128, 128, 128);
+        assert_ne!(small, large);
     }
 }

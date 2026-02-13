@@ -19,7 +19,6 @@ pub fn encode_sequence_header(width: u32, height: u32) -> Vec<u8> {
     let operating_points_cnt_minus_1 = 0u64;
     let operating_point_idc = 0u64;
     let seq_level_idx = 13u64;
-    let seq_tier = false;
 
     w.write_bits(seq_profile, 3);
     w.write_bit(still_picture);
@@ -29,7 +28,7 @@ pub fn encode_sequence_header(width: u32, height: u32) -> Vec<u8> {
     w.write_bits(operating_points_cnt_minus_1, 5);
     w.write_bits(operating_point_idc, 12);
     w.write_bits(seq_level_idx, 5);
-    w.write_bit(seq_tier);
+    w.write_bit(false);
 
     let frame_width_bits_minus_1 = bits_needed(width - 1) - 1;
     let frame_height_bits_minus_1 = bits_needed(height - 1) - 1;
@@ -86,6 +85,8 @@ pub fn encode_sequence_header(width: u32, height: u32) -> Vec<u8> {
     w.write_bit(separate_uv_delta_q);
     w.write_bit(film_grain_params_present);
 
+    w.write_bit(true);
+
     w.finalize()
 }
 
@@ -122,7 +123,6 @@ mod tests {
     #[test]
     fn sequence_header_64x64() {
         let bytes = encode_sequence_header(64, 64);
-        assert_eq!(bytes.len(), 9);
 
         let mut expected = BitWriter::new();
         expected.write_bits(0, 3);
@@ -158,6 +158,8 @@ mod tests {
         expected.write_bits(0, 2);
         expected.write_bit(false);
         expected.write_bit(false);
+
+        expected.write_bit(true);
 
         assert_eq!(bytes, expected.finalize());
     }
