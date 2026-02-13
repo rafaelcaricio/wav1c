@@ -29,8 +29,6 @@ pub fn encode_frame(width: u32, height: u32, y: u8, u: u8, v: u8) -> Vec<u8> {
 
     w.write_bit(false);
 
-    w.write_bit(false);
-
     w.write_bit(true);
 
     let min_log2_cols = tile_log2(MAX_TILE_WIDTH_SB, sbw);
@@ -68,7 +66,7 @@ pub fn encode_frame(width: u32, height: u32, y: u8, u: u8, v: u8) -> Vec<u8> {
     w.write_bit(false);
 
     let mut header_bytes = w.finalize();
-    let tile_data = crate::tile::encode_tile(y, u, v, base_q_idx);
+    let tile_data = crate::tile::encode_tile(width, height, y, u, v);
     header_bytes.extend_from_slice(&tile_data);
     header_bytes
 }
@@ -98,8 +96,6 @@ mod tests {
         expected.write_bit(true);
         expected.write_bit(false);
         expected.write_bit(false);
-        expected.write_bit(false);
-
         expected.write_bit(false);
 
         expected.write_bit(false);
@@ -158,8 +154,6 @@ mod tests {
         expected.write_bit(true);
         expected.write_bit(false);
         expected.write_bit(false);
-        expected.write_bit(false);
-
         expected.write_bit(false);
 
         expected.write_bit(false);
