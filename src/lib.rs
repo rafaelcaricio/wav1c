@@ -8,32 +8,46 @@ pub mod sequence;
 pub mod tile;
 pub mod y4m;
 
-pub fn encode_av1_ivf_y4m(pixels: &y4m::FramePixels) -> Vec<u8> {
-    assert!(
-        (1..=4096).contains(&pixels.width),
-        "width must be 1..=4096"
-    );
-    assert!(
-        (1..=2304).contains(&pixels.height),
-        "height must be 1..=2304"
-    );
+pub fn encode_av1_ivf_multi(frames: &[y4m::FramePixels]) -> Vec<u8> {
+    assert!(!frames.is_empty(), "frames must not be empty");
 
-    let td = obu::obu_wrap(obu::ObuType::TemporalDelimiter, &[]);
-    let seq = obu::obu_wrap(
-        obu::ObuType::SequenceHeader,
-        &sequence::encode_sequence_header(pixels.width, pixels.height),
-    );
-    let frm = obu::obu_wrap(obu::ObuType::Frame, &frame::encode_frame(pixels));
+    let width = frames[0].width;
+    let height = frames[0].height;
 
-    let mut frame_data = Vec::new();
-    frame_data.extend_from_slice(&td);
-    frame_data.extend_from_slice(&seq);
-    frame_data.extend_from_slice(&frm);
+    for frame in &frames[1..] {
+        assert!(
+            frame.width == width && frame.height == height,
+            "all frames must have the same dimensions"
+        );
+    }
+
+    assert!((1..=4096).contains(&width), "width must be 1..=4096");
+    assert!((1..=2304).contains(&height), "height must be 1..=2304");
 
     let mut output = Vec::new();
-    ivf::write_ivf_header(&mut output, pixels.width as u16, pixels.height as u16, 1).unwrap();
-    ivf::write_ivf_frame(&mut output, 0, &frame_data).unwrap();
+    ivf::write_ivf_header(&mut output, width as u16, height as u16, frames.len() as u32).unwrap();
+
+    for (i, pixels) in frames.iter().enumerate() {
+        let td = obu::obu_wrap(obu::ObuType::TemporalDelimiter, &[]);
+        let seq = obu::obu_wrap(
+            obu::ObuType::SequenceHeader,
+            &sequence::encode_sequence_header(width, height),
+        );
+        let frm = obu::obu_wrap(obu::ObuType::Frame, &frame::encode_frame(pixels));
+
+        let mut frame_data = Vec::new();
+        frame_data.extend_from_slice(&td);
+        frame_data.extend_from_slice(&seq);
+        frame_data.extend_from_slice(&frm);
+
+        ivf::write_ivf_frame(&mut output, i as u64, &frame_data).unwrap();
+    }
+
     output
+}
+
+pub fn encode_av1_ivf_y4m(pixels: &y4m::FramePixels) -> Vec<u8> {
+    encode_av1_ivf_multi(std::slice::from_ref(pixels))
 }
 
 pub fn encode_av1_ivf(width: u32, height: u32, y: u8, u: u8, v: u8) -> Vec<u8> {
@@ -86,5 +100,45 @@ mod tests {
         let pixels = y4m::FramePixels::solid(64, 64, 128, 128, 128);
         let y4m_out = encode_av1_ivf_y4m(&pixels);
         assert_eq!(solid, y4m_out);
+    }
+
+    #[test]
+    fn multi_frame_ivf_header_has_correct_count() {
+        let frames: Vec<_> = (0..3)
+            .map(|_| y4m::FramePixels::solid(64, 64, 128, 128, 128))
+            .collect();
+        let output = encode_av1_ivf_multi(&frames);
+        let count = u32::from_le_bytes(output[24..28].try_into().unwrap());
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn multi_frame_produces_larger_output() {
+        let one = encode_av1_ivf_multi(&[y4m::FramePixels::solid(64, 64, 128, 128, 128)]);
+        let three: Vec<_> = (0..3)
+            .map(|_| y4m::FramePixels::solid(64, 64, 128, 128, 128))
+            .collect();
+        let multi = encode_av1_ivf_multi(&three);
+        assert!(multi.len() > one.len());
+    }
+
+    #[test]
+    fn single_frame_multi_matches_single() {
+        let pixels = y4m::FramePixels::solid(64, 64, 128, 128, 128);
+        let single = encode_av1_ivf_y4m(&pixels);
+        let multi = encode_av1_ivf_multi(&[y4m::FramePixels::solid(64, 64, 128, 128, 128)]);
+        assert_eq!(single, multi);
+    }
+
+    #[test]
+    fn multi_frame_different_content() {
+        let frames = vec![
+            y4m::FramePixels::solid(64, 64, 0, 0, 0),
+            y4m::FramePixels::solid(64, 64, 255, 128, 128),
+        ];
+        let output = encode_av1_ivf_multi(&frames);
+        let count = u32::from_le_bytes(output[24..28].try_into().unwrap());
+        assert_eq!(count, 2);
+        assert!(output.len() > 32);
     }
 }
