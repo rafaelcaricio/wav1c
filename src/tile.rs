@@ -3,117 +3,19 @@ use crate::msac::MsacEncoder;
 use crate::y4m::FramePixels;
 use std::cmp::min;
 
+#[path = "dct.rs"]
+mod dct;
+#[path = "scan.rs"]
+mod scan;
+
+use scan::{DEFAULT_SCAN_4X4, DEFAULT_SCAN_8X8, LO_CTX_OFFSETS_2D};
+
 const DQ_DC_Q128: u32 = 140;
-
-struct BlockParams {
-    luma_t_dim_ctx: usize,
-    luma_dq_shift: u32,
-    luma_itx_shift: u32,
-    chroma_t_dim_ctx: usize,
-    chroma_dq_shift: u32,
-    chroma_itx_shift: u32,
-}
-
-const BLOCK_PARAMS: [BlockParams; 5] = [
-    BlockParams {
-        luma_t_dim_ctx: 0,
-        luma_dq_shift: 0,
-        luma_itx_shift: 0,
-        chroma_t_dim_ctx: 0,
-        chroma_dq_shift: 0,
-        chroma_itx_shift: 0,
-    },
-    BlockParams {
-        luma_t_dim_ctx: 4,
-        luma_dq_shift: 2,
-        luma_itx_shift: 2,
-        chroma_t_dim_ctx: 3,
-        chroma_dq_shift: 1,
-        chroma_itx_shift: 2,
-    },
-    BlockParams {
-        luma_t_dim_ctx: 3,
-        luma_dq_shift: 1,
-        luma_itx_shift: 2,
-        chroma_t_dim_ctx: 2,
-        chroma_dq_shift: 0,
-        chroma_itx_shift: 2,
-    },
-    BlockParams {
-        luma_t_dim_ctx: 2,
-        luma_dq_shift: 0,
-        luma_itx_shift: 2,
-        chroma_t_dim_ctx: 1,
-        chroma_dq_shift: 0,
-        chroma_itx_shift: 1,
-    },
-    BlockParams {
-        luma_t_dim_ctx: 1,
-        luma_dq_shift: 0,
-        luma_itx_shift: 1,
-        chroma_t_dim_ctx: 0,
-        chroma_dq_shift: 0,
-        chroma_itx_shift: 0,
-    },
-];
+const DQ_AC_Q128: u32 = 176;
 
 const PARTITION_CTX_NONE: [u8; 5] = [0, 0x10, 0x18, 0x1c, 0x1e];
 
 const PARTITION_NSYMS: [u32; 5] = [9, 9, 9, 9, 3];
-
-fn decoder_dc_residual(cf0: i32, itx_shift: u32) -> i32 {
-    let rnd = (1i32 << itx_shift) >> 1;
-    let dc = (cf0 * 181 + 128) >> 8;
-    let dc = (dc + rnd) >> itx_shift;
-    (dc * 181 + 128 + 2048) >> 12
-}
-
-fn compute_dc_tok(target_pixel: u8, dc_pred: u8, dq_shift: u32, itx_shift: u32) -> (u32, bool) {
-    let residual = target_pixel as i32 - dc_pred as i32;
-    if residual == 0 {
-        return (0, false);
-    }
-    let is_negative = residual < 0;
-    let abs_residual = residual.unsigned_abs() as i32;
-
-    let mut best_tok: u32 = 0;
-    let mut best_error = abs_residual;
-
-    for tok in 1u32..=1024 {
-        let cf0 = ((DQ_DC_Q128 * tok) >> dq_shift) as i32;
-        let pixel_residual = decoder_dc_residual(cf0, itx_shift);
-        let error = (pixel_residual - abs_residual).abs();
-        if error < best_error {
-            best_error = error;
-            best_tok = tok;
-        }
-        if pixel_residual >= abs_residual {
-            break;
-        }
-    }
-
-    (best_tok, is_negative)
-}
-
-fn compute_reconstructed_dc(
-    dc_pred: u8,
-    dc_tok: u32,
-    is_negative: bool,
-    dq_shift: u32,
-    itx_shift: u32,
-) -> u8 {
-    if dc_tok == 0 {
-        return dc_pred;
-    }
-    let cf0 = ((DQ_DC_Q128 * dc_tok) >> dq_shift) as i32;
-    let pixel_residual = decoder_dc_residual(cf0, itx_shift);
-    let signed_residual = if is_negative {
-        -pixel_residual
-    } else {
-        pixel_residual
-    };
-    (dc_pred as i32 + signed_residual).clamp(0, 255) as u8
-}
 
 fn encode_hi_tok(enc: &mut MsacEncoder, cdf: &mut [u16], dc_tok: u32) {
     let mut base = 3;
@@ -127,71 +29,234 @@ fn encode_hi_tok(enc: &mut MsacEncoder, cdf: &mut [u16], dc_tok: u32) {
     }
 }
 
-#[derive(Clone, Copy)]
-enum EobBin {
-    Bin16,
-    Bin64,
-    Bin256,
-    Bin1024,
+fn eob_to_bin(eob: usize) -> usize {
+    match eob {
+        0 => 0,
+        1 => 1,
+        2..=3 => 2,
+        4..=7 => 3,
+        8..=15 => 4,
+        16..=31 => 5,
+        32..=63 => 6,
+        _ => 7,
+    }
+}
+
+fn get_lo_ctx(level: &[u8], stride: usize, x: usize, y: usize) -> (usize, u32) {
+    let mag = level[1] as u32 + level[stride] as u32;
+    let hi_mag = mag + level[stride + 1] as u32;
+    let full_mag = hi_mag + level[2] as u32 + level[2 * stride] as u32;
+
+    let offset = LO_CTX_OFFSETS_2D[y.min(4)][x.min(4)] as usize;
+
+    let mag_ctx = if full_mag > 512 { 4 } else { ((full_mag + 64) >> 7) as usize };
+    (offset + mag_ctx, hi_mag)
+}
+
+fn level_tok(magnitude: u32) -> u8 {
+    match magnitude {
+        0 => 0,
+        1 => 0x41,
+        2 => 0x82,
+        m => (m.min(15) as u8) + (3 << 6),
+    }
+}
+
+fn get_hi_mag(level: &[u8], stride: usize) -> u32 {
+    level[1] as u32 + level[stride] as u32 + level[stride + 1] as u32
+}
+
+fn coef_ctx_value(cul_level: u8, dc_sign_negative: bool, dc_is_zero: bool) -> u8 {
+    let dc_sign_level: u8 = if dc_is_zero {
+        0x40
+    } else if dc_sign_negative {
+        0x00
+    } else {
+        0x80
+    };
+    cul_level | dc_sign_level
 }
 
 #[allow(clippy::too_many_arguments)]
-fn encode_plane_coeffs(
+fn encode_transform_block(
     enc: &mut MsacEncoder,
     cdf: &mut CdfContext,
-    dc_tok: u32,
-    is_negative: bool,
+    coeffs: &[i32],
+    scan_table: &[u16],
     is_chroma: bool,
+    is_inter: bool,
     t_dim_ctx: usize,
-    eob_bin: EobBin,
     txb_skip_ctx: usize,
     dc_sign_ctx: usize,
-) {
+) -> (u8, bool, bool) {
     let chroma_idx = if is_chroma { 1 } else { 0 };
+    let n = scan_table.len();
+    let w = if n == 16 { 4usize } else { 8usize };
+
+    let mut eob: i32 = -1;
+    for i in 0..n {
+        let rc = scan_table[i] as usize;
+        if coeffs[rc] != 0 {
+            eob = i as i32;
+        }
+    }
+
+    if eob < 0 {
+        enc.encode_bool(true, &mut cdf.txb_skip[t_dim_ctx][txb_skip_ctx]);
+        return (0, false, true);
+    }
+    let eob = eob as usize;
 
     enc.encode_bool(false, &mut cdf.txb_skip[t_dim_ctx][txb_skip_ctx]);
 
-    match eob_bin {
-        EobBin::Bin16 => enc.encode_symbol(0, &mut cdf.eob_bin_16[chroma_idx][0], 4),
-        EobBin::Bin64 => enc.encode_symbol(0, &mut cdf.eob_bin_64[chroma_idx][0], 6),
-        EobBin::Bin256 => enc.encode_symbol(0, &mut cdf.eob_bin_256[chroma_idx][0], 8),
-        EobBin::Bin1024 => enc.encode_symbol(0, &mut cdf.eob_bin_1024[chroma_idx], 10),
+    if !is_chroma {
+        if is_inter {
+            enc.encode_bool(true, &mut cdf.txtp_inter);
+        } else {
+            enc.encode_symbol(1, &mut cdf.txtp_intra, 4);
+        }
     }
 
-    let tok_br = match dc_tok {
-        1 => 0u32,
-        2 => 1,
-        _ => 2,
+    let eob_bin = eob_to_bin(eob);
+    let n_eob_syms = if n == 16 { 4u32 } else { 6u32 };
+    let eob_cdf = if n == 16 {
+        &mut cdf.eob_bin_16[chroma_idx][0]
+    } else {
+        &mut cdf.eob_bin_64[chroma_idx][0]
     };
-    enc.encode_symbol(tok_br, &mut cdf.eob_base_tok[t_dim_ctx][chroma_idx][0], 2);
+    enc.encode_symbol(eob_bin as u32, eob_cdf, n_eob_syms);
 
-    if dc_tok >= 3 {
-        let br_ctx = min(t_dim_ctx, 3);
-        encode_hi_tok(enc, &mut cdf.br_tok[br_ctx][chroma_idx][0], dc_tok);
+    if eob_bin >= 2 {
+        let extra_bits = eob_bin - 2;
+        let hi_bit = (eob >> extra_bits) & 1;
+        enc.encode_bool(hi_bit != 0, &mut cdf.eob_hi_bit[t_dim_ctx][chroma_idx][eob_bin - 2]);
+        for bit_idx in (0..extra_bits).rev() {
+            enc.encode_bool_equi((eob >> bit_idx) & 1 != 0);
+        }
     }
 
-    enc.encode_bool(is_negative, &mut cdf.dc_sign[chroma_idx][dc_sign_ctx]);
+    let stride = w;
+    let levels_size = stride * (w + 2);
+    let mut levels = vec![0u8; levels_size];
 
-    if dc_tok >= 15 {
-        enc.encode_golomb(dc_tok - 15);
+    let tx2dszctx = if n == 16 { 0usize } else { 2 };
+    let eob_ctx = if eob == 0 {
+        0
+    } else {
+        1 + usize::from(eob > (2 << tx2dszctx)) + usize::from(eob > (4 << tx2dszctx))
+    };
+
+    {
+        let eob_rc = scan_table[eob] as usize;
+        let eob_level = coeffs[eob_rc].unsigned_abs();
+        let eob_tok = eob_level.min(3);
+        let eob_base = if eob_tok >= 3 { 2u32 } else { eob_tok.saturating_sub(1) };
+        enc.encode_symbol(eob_base, &mut cdf.eob_base_tok[t_dim_ctx][chroma_idx][eob_ctx], 2);
+
+        if eob_level >= 3 {
+            let eob_x = eob_rc % w;
+            let eob_y = eob_rc / w;
+            let mag = get_hi_mag(&levels[eob_rc..], stride) & 63;
+            let hi_ctx = if eob == 0 {
+                0
+            } else {
+                (if (eob_y | eob_x) > 1 { 14 } else { 7 })
+                    + (if mag > 12 { 6 } else { ((mag + 1) >> 1) as usize })
+            };
+            encode_hi_tok(enc, &mut cdf.br_tok[t_dim_ctx.min(3)][chroma_idx][hi_ctx], eob_level);
+        }
+
+        levels[eob_rc] = level_tok(eob_level);
     }
+
+    for i in (1..eob).rev() {
+        let rc = scan_table[i] as usize;
+        let x = rc % w;
+        let y = rc / w;
+        let level = coeffs[rc].unsigned_abs();
+
+        let (ctx, _hi_mag) = get_lo_ctx(&levels[rc..], stride, x, y);
+        let tok = level.min(3) as u32;
+        enc.encode_symbol(tok, &mut cdf.base_tok[t_dim_ctx][chroma_idx][ctx], 3);
+
+        if level >= 3 {
+            let mag = get_hi_mag(&levels[rc..], stride) & 63;
+            let hi_ctx = (if (y | x) > 1 { 14 } else { 7 })
+                + (if mag > 12 { 6 } else { ((mag + 1) >> 1) as usize });
+            encode_hi_tok(enc, &mut cdf.br_tok[t_dim_ctx.min(3)][chroma_idx][hi_ctx], level);
+        }
+
+        levels[rc] = level_tok(level);
+    }
+
+    if eob > 0 {
+        let level = coeffs[0].unsigned_abs();
+
+        let tok = level.min(3) as u32;
+        enc.encode_symbol(tok, &mut cdf.base_tok[t_dim_ctx][chroma_idx][0], 3);
+
+        if level >= 3 {
+            let mag = get_hi_mag(&levels, stride) & 63;
+            let hi_ctx = if mag > 12 { 6 } else { ((mag + 1) >> 1) as usize };
+            encode_hi_tok(enc, &mut cdf.br_tok[t_dim_ctx.min(3)][chroma_idx][hi_ctx], level);
+        }
+
+        levels[0] = level_tok(level);
+    }
+
+    if coeffs[0] != 0 {
+        let is_negative = coeffs[0] < 0;
+        enc.encode_bool(is_negative, &mut cdf.dc_sign[chroma_idx][dc_sign_ctx]);
+    }
+    if coeffs[0].unsigned_abs() >= 15 {
+        enc.encode_golomb(coeffs[0].unsigned_abs() - 15);
+    }
+
+    for i in 1..=eob {
+        let rc = scan_table[i] as usize;
+        if coeffs[rc] != 0 {
+            enc.encode_bool_equi(coeffs[rc] < 0);
+            if coeffs[rc].unsigned_abs() >= 15 {
+                enc.encode_golomb(coeffs[rc].unsigned_abs() - 15);
+            }
+        }
+    }
+
+    let cul_level: u32 = (0..=eob)
+        .map(|i| {
+            let rc = scan_table[i] as usize;
+            coeffs[rc].unsigned_abs()
+        })
+        .sum();
+    let cul_level = cul_level.min(63) as u8;
+    let dc_is_zero = coeffs[0] == 0;
+    let dc_negative = coeffs[0] < 0;
+
+    (cul_level, dc_negative, dc_is_zero)
 }
 
-fn luma_eob_bin(bl: usize) -> EobBin {
-    match bl {
-        3 => EobBin::Bin256,
-        4 => EobBin::Bin64,
-        _ => EobBin::Bin1024,
+fn quantize_coeffs(dct_coeffs: &[i32], n: usize, dc_dq: u32, ac_dq: u32) -> Vec<i32> {
+    let mut quantized = vec![0i32; n];
+    for i in 0..n {
+        let dq = if i == 0 { dc_dq } else { ac_dq };
+        let abs_val = dct_coeffs[i].unsigned_abs();
+        let tok = (abs_val + dq / 2) / dq;
+        quantized[i] = if dct_coeffs[i] < 0 {
+            -(tok as i32)
+        } else {
+            tok as i32
+        };
     }
+    quantized
 }
 
-fn chroma_eob_bin(bl: usize) -> EobBin {
-    match bl {
-        2 => EobBin::Bin256,
-        3 => EobBin::Bin64,
-        4 => EobBin::Bin16,
-        _ => EobBin::Bin1024,
+fn dequantize_coeffs(quantized: &[i32], n: usize, dc_dq: u32, ac_dq: u32) -> Vec<i32> {
+    let mut dequantized = vec![0i32; n];
+    for i in 0..n {
+        let dq = if i == 0 { dc_dq } else { ac_dq };
+        dequantized[i] = quantized[i] * dq as i32;
     }
+    dequantized
 }
 
 fn gather_top_partition_prob(pc: &[u16], bl: usize) -> u16 {
@@ -212,45 +277,24 @@ fn gather_left_partition_prob(pc: &[u16], bl: usize) -> u16 {
     out
 }
 
-fn coef_ctx_value(dc_tok: u32, is_negative: bool) -> u8 {
-    let cul_level = min(dc_tok, 63) as u8;
-    let dc_sign_level: u8 = if dc_tok == 0 {
-        0x40
-    } else if is_negative {
-        0x00
-    } else {
-        0x80
-    };
-    cul_level | dc_sign_level
-}
-
-fn block_average(
+fn extract_block(
     plane: &[u8],
-    stride: u32,
+    plane_stride: u32,
     px_x: u32,
     px_y: u32,
-    block_size: u32,
+    block_size: usize,
     frame_w: u32,
     frame_h: u32,
-) -> u8 {
-    let x_end = min(px_x + block_size, frame_w);
-    let y_end = min(px_y + block_size, frame_h);
-    let actual_w = x_end - px_x;
-    let actual_h = y_end - px_y;
-
-    if actual_w == 0 || actual_h == 0 {
-        return 128;
-    }
-
-    let mut sum = 0u32;
-    for row in px_y..y_end {
-        let row_start = (row * stride + px_x) as usize;
-        for col in 0..actual_w {
-            sum += plane[row_start + col as usize] as u32;
+) -> Vec<u8> {
+    let mut block = vec![0u8; block_size * block_size];
+    for r in 0..block_size {
+        for c in 0..block_size {
+            let sy = min(px_y + r as u32, frame_h - 1);
+            let sx = min(px_x + c as u32, frame_w - 1);
+            block[r * block_size + c] = plane[(sy * plane_stride + sx) as usize];
         }
     }
-    let count = actual_w * actual_h;
-    ((sum + count / 2) / count) as u8
+    block
 }
 
 struct TileEncoder<'a> {
@@ -271,9 +315,9 @@ struct TileContext {
     above_recon_y: Vec<u8>,
     above_recon_u: Vec<u8>,
     above_recon_v: Vec<u8>,
-    left_recon_y: [u8; 16],
-    left_recon_u: [u8; 8],
-    left_recon_v: [u8; 8],
+    left_recon_y: [u8; 64],
+    left_recon_u: [u8; 32],
+    left_recon_v: [u8; 32],
     above_lcoef: Vec<u8>,
     left_lcoef: [u8; 32],
     above_ccoef: [Vec<u8>; 2],
@@ -286,7 +330,8 @@ impl TileContext {
     fn new(mi_cols: u32) -> Self {
         let above_part_size = (mi_cols as usize / 2) + 16;
         let above_skip_size = mi_cols as usize + 32;
-        let above_recon_cols = (mi_cols as usize / 2) + 16;
+        let above_recon_y_size = mi_cols as usize * 4 + 32;
+        let above_recon_uv_size = mi_cols as usize * 2 + 16;
         let above_coef_size = mi_cols as usize + 32;
         let above_ccoef_size = (mi_cols as usize / 2) + 16;
         let above_inter_size = mi_cols as usize + 32;
@@ -295,12 +340,12 @@ impl TileContext {
             above_skip: vec![0u8; above_skip_size],
             left_partition: [0u8; 16],
             left_skip: [0u8; 32],
-            above_recon_y: vec![128u8; above_recon_cols],
-            above_recon_u: vec![128u8; above_recon_cols],
-            above_recon_v: vec![128u8; above_recon_cols],
-            left_recon_y: [128u8; 16],
-            left_recon_u: [128u8; 8],
-            left_recon_v: [128u8; 8],
+            above_recon_y: vec![128u8; above_recon_y_size],
+            above_recon_u: vec![128u8; above_recon_uv_size],
+            above_recon_v: vec![128u8; above_recon_uv_size],
+            left_recon_y: [128u8; 64],
+            left_recon_u: [128u8; 32],
+            left_recon_v: [128u8; 32],
             above_lcoef: vec![0x40u8; above_coef_size],
             left_lcoef: [0x40u8; 32],
             above_ccoef: [
@@ -316,9 +361,9 @@ impl TileContext {
     fn reset_left_for_sb_row(&mut self) {
         self.left_partition = [0u8; 16];
         self.left_skip = [0u8; 32];
-        self.left_recon_y = [128u8; 16];
-        self.left_recon_u = [128u8; 8];
-        self.left_recon_v = [128u8; 8];
+        self.left_recon_y = [128u8; 64];
+        self.left_recon_u = [128u8; 32];
+        self.left_recon_v = [128u8; 32];
         self.left_lcoef = [0x40u8; 32];
         self.left_ccoef = [[0x40u8; 16]; 2];
         self.left_intra = [false; 32];
@@ -469,12 +514,9 @@ impl TileContext {
         bl: usize,
         mi_cols: u32,
         mi_rows: u32,
-        y_tok: u32,
-        y_neg: bool,
-        u_tok: u32,
-        u_neg: bool,
-        v_tok: u32,
-        v_neg: bool,
+        y_ctx: u8,
+        u_ctx: u8,
+        v_ctx: u8,
     ) {
         let bx4 = bx as usize;
         let by4 = (by & 31) as usize;
@@ -483,15 +525,14 @@ impl TileContext {
         let aw = min(bw4, (mi_cols - bx) as usize);
         let lh = min(bw4, (mi_rows - by) as usize);
 
-        let y_cf_ctx = coef_ctx_value(y_tok, y_neg);
         for i in 0..aw {
             if bx4 + i < self.above_lcoef.len() {
-                self.above_lcoef[bx4 + i] = y_cf_ctx;
+                self.above_lcoef[bx4 + i] = y_ctx;
             }
         }
         for i in 0..lh {
             if by4 + i < self.left_lcoef.len() {
-                self.left_lcoef[by4 + i] = y_cf_ctx;
+                self.left_lcoef[by4 + i] = y_ctx;
             }
         }
 
@@ -502,24 +543,21 @@ impl TileContext {
         let caw = min(cw4, (mi_cols - bx).div_ceil(2) as usize);
         let clh = min(cw4, (mi_rows - by).div_ceil(2) as usize);
 
-        let u_cf_ctx = coef_ctx_value(u_tok, u_neg);
-        let v_cf_ctx = coef_ctx_value(v_tok, v_neg);
-
         for i in 0..caw {
             if cbx4 + i < self.above_ccoef[0].len() {
-                self.above_ccoef[0][cbx4 + i] = u_cf_ctx;
-                self.above_ccoef[1][cbx4 + i] = v_cf_ctx;
+                self.above_ccoef[0][cbx4 + i] = u_ctx;
+                self.above_ccoef[1][cbx4 + i] = v_ctx;
             }
         }
         for i in 0..clh {
             if cby4 + i < self.left_ccoef[0].len() {
-                self.left_ccoef[0][cby4 + i] = u_cf_ctx;
-                self.left_ccoef[1][cby4 + i] = v_cf_ctx;
+                self.left_ccoef[0][cby4 + i] = u_ctx;
+                self.left_ccoef[1][cby4 + i] = v_ctx;
             }
         }
     }
 
-    fn dc_prediction(&self, bx: u32, by: u32, bl: usize, plane: usize) -> u8 {
+    fn dc_prediction(&self, bx: u32, by: u32, _bl: usize, plane: usize) -> u8 {
         let have_top = by > 0;
         let have_left = bx > 0;
 
@@ -527,58 +565,70 @@ impl TileContext {
             return 128;
         }
 
-        let (above_recon, left_recon) = match plane {
-            0 => (&self.above_recon_y[..], &self.left_recon_y[..]),
-            1 => (&self.above_recon_u[..], &self.left_recon_u[..]),
-            _ => (&self.above_recon_v[..], &self.left_recon_v[..]),
-        };
-
-        let (bx8, by8_local, n_entries) = if plane == 0 {
-            let bx8 = (bx >> 1) as usize;
-            let by8 = ((by & 31) >> 1) as usize;
-            let n = 16usize >> bl;
-            (bx8, by8, n)
+        let (above_recon, left_recon, px_x, left_local_py, block_pixels) = if plane == 0 {
+            (
+                &self.above_recon_y[..],
+                &self.left_recon_y[..],
+                (bx * 4) as usize,
+                ((by & 15) * 4) as usize,
+                8usize,
+            )
         } else {
-            let bx8 = (bx >> 2) as usize;
-            let by8 = ((by & 31) >> 2) as usize;
-            let n = (16usize >> bl).max(1);
-            (bx8, by8, n)
+            let above = if plane == 1 {
+                &self.above_recon_u[..]
+            } else {
+                &self.above_recon_v[..]
+            };
+            let left = if plane == 1 {
+                &self.left_recon_u[..]
+            } else {
+                &self.left_recon_v[..]
+            };
+            (
+                above,
+                left,
+                (bx * 2) as usize,
+                ((by & 15) * 2) as usize,
+                4usize,
+            )
         };
 
         if have_top && have_left {
-            let above_val = above_recon[min(bx8, above_recon.len() - 1)];
-            let left_val = left_recon[min(by8_local, left_recon.len() - 1)];
-            ((above_val as u16 + left_val as u16 + 1) >> 1) as u8
-        } else if have_top {
             let mut sum = 0u32;
-            let mut count = 0u32;
-            for i in 0..n_entries {
-                let idx = bx8 + i;
+            for i in 0..block_pixels {
+                let idx = px_x + i;
                 if idx < above_recon.len() {
                     sum += above_recon[idx] as u32;
-                    count += 1;
                 }
             }
-            if count > 0 {
-                ((sum + count / 2) / count) as u8
-            } else {
-                128
-            }
-        } else {
-            let mut sum = 0u32;
-            let mut count = 0u32;
-            for i in 0..n_entries {
-                let idx = by8_local + i;
+            for i in 0..block_pixels {
+                let idx = left_local_py + i;
                 if idx < left_recon.len() {
                     sum += left_recon[idx] as u32;
-                    count += 1;
                 }
             }
-            if count > 0 {
-                ((sum + count / 2) / count) as u8
-            } else {
-                128
+            let count = (2 * block_pixels) as u32;
+            ((sum + count / 2) / count) as u8
+        } else if have_top {
+            let mut sum = 0u32;
+            for i in 0..block_pixels {
+                let idx = px_x + i;
+                if idx < above_recon.len() {
+                    sum += above_recon[idx] as u32;
+                }
             }
+            let count = block_pixels as u32;
+            ((sum + count / 2) / count) as u8
+        } else {
+            let mut sum = 0u32;
+            for i in 0..block_pixels {
+                let idx = left_local_py + i;
+                if idx < left_recon.len() {
+                    sum += left_recon[idx] as u32;
+                }
+            }
+            let count = block_pixels as u32;
+            ((sum + count / 2) / count) as u8
         }
     }
 
@@ -587,46 +637,48 @@ impl TileContext {
         &mut self,
         bx: u32,
         by: u32,
-        bl: usize,
         mi_cols: u32,
         mi_rows: u32,
-        recon_y: u8,
-        recon_u: u8,
-        recon_v: u8,
+        y_bottom_row: &[u8],
+        y_right_col: &[u8],
+        u_bottom_row: &[u8],
+        u_right_col: &[u8],
+        v_bottom_row: &[u8],
+        v_right_col: &[u8],
     ) {
-        let bx8 = (bx >> 1) as usize;
-        let by8 = ((by & 31) >> 1) as usize;
-        let n_luma = 16usize >> bl;
-        let aw = min(n_luma, (mi_cols - bx).div_ceil(2) as usize);
-        let lh = min(n_luma, (mi_rows - by).div_ceil(2) as usize);
+        let px_x = (bx * 4) as usize;
+        let py_local = ((by & 15) * 4) as usize;
+        let max_px_x = (mi_cols * 4) as usize;
+        let max_py = (mi_rows * 4) as usize;
+        let py_abs = (by * 4) as usize;
 
-        for i in 0..aw {
-            if bx8 + i < self.above_recon_y.len() {
-                self.above_recon_y[bx8 + i] = recon_y;
+        for i in 0..8 {
+            if px_x + i < max_px_x && px_x + i < self.above_recon_y.len() {
+                self.above_recon_y[px_x + i] = y_bottom_row[i];
             }
         }
-        for i in 0..lh {
-            if by8 + i < self.left_recon_y.len() {
-                self.left_recon_y[by8 + i] = recon_y;
+        for i in 0..8 {
+            if py_abs + i < max_py && py_local + i < self.left_recon_y.len() {
+                self.left_recon_y[py_local + i] = y_right_col[i];
             }
         }
 
-        let bx_c = (bx >> 2) as usize;
-        let by_c = ((by & 31) >> 2) as usize;
-        let n_chroma = (16usize >> bl).max(1);
-        let caw = min(n_chroma, (mi_cols - bx).div_ceil(4) as usize);
-        let clh = min(n_chroma, (mi_rows - by).div_ceil(4) as usize);
+        let cpx = (bx * 2) as usize;
+        let cpy_local = ((by & 15) * 2) as usize;
+        let max_cpx = (mi_cols * 2) as usize;
+        let cpy_abs = (by * 2) as usize;
+        let max_cpy = (mi_rows * 2) as usize;
 
-        for i in 0..caw {
-            if bx_c + i < self.above_recon_u.len() {
-                self.above_recon_u[bx_c + i] = recon_u;
-                self.above_recon_v[bx_c + i] = recon_v;
+        for i in 0..4 {
+            if cpx + i < max_cpx && cpx + i < self.above_recon_u.len() {
+                self.above_recon_u[cpx + i] = u_bottom_row[i];
+                self.above_recon_v[cpx + i] = v_bottom_row[i];
             }
         }
-        for i in 0..clh {
-            if by_c + i < self.left_recon_u.len() {
-                self.left_recon_u[by_c + i] = recon_u;
-                self.left_recon_v[by_c + i] = recon_v;
+        for i in 0..4 {
+            if cpy_abs + i < max_cpy && cpy_local + i < self.left_recon_u.len() {
+                self.left_recon_u[cpy_local + i] = u_right_col[i];
+                self.left_recon_v[cpy_local + i] = v_right_col[i];
             }
         }
     }
@@ -750,94 +802,48 @@ impl<'a> TileEncoder<'a> {
         }
     }
 
-    fn fill_recon(&mut self, bx: u32, by: u32, bl: usize, recon_y: u8, recon_u: u8, recon_v: u8) {
-        let luma_px = 128u32 >> bl;
-        let chroma_px = luma_px / 2;
+    fn encode_block(&mut self, bx: u32, by: u32, bl: usize) {
         let px_x = bx * 4;
         let px_y = by * 4;
-        let w = self.recon.width;
-        let h = self.recon.height;
+        let w = self.pixels.width;
+        let h = self.pixels.height;
         let cw = w.div_ceil(2);
         let ch = h.div_ceil(2);
-
-        let x_end = min(px_x + luma_px, w);
-        let y_end = min(px_y + luma_px, h);
-        for row in px_y..y_end {
-            let start = (row * w + px_x) as usize;
-            let end = (row * w + x_end) as usize;
-            self.recon.y[start..end].fill(recon_y);
-        }
-
-        let cpx_x = px_x / 2;
-        let cpx_y = px_y / 2;
-        let cx_end = min(cpx_x + chroma_px, cw);
-        let cy_end = min(cpx_y + chroma_px, ch);
-        for row in cpx_y..cy_end {
-            let start = (row * cw + cpx_x) as usize;
-            let end = (row * cw + cx_end) as usize;
-            self.recon.u[start..end].fill(recon_u);
-            self.recon.v[start..end].fill(recon_v);
-        }
-    }
-
-    fn encode_block(&mut self, bx: u32, by: u32, bl: usize) {
-        let params = &BLOCK_PARAMS[bl];
-        let luma_px = 128u32 >> bl;
-        let chroma_px = luma_px / 2;
-        let px_x = bx * 4;
-        let px_y = by * 4;
         let chroma_px_x = px_x / 2;
         let chroma_px_y = px_y / 2;
-        let chroma_w = self.pixels.width.div_ceil(2);
-        let chroma_h = self.pixels.height.div_ceil(2);
-
-        let y_avg = block_average(
-            &self.pixels.y,
-            self.pixels.width,
-            px_x,
-            px_y,
-            luma_px,
-            self.pixels.width,
-            self.pixels.height,
-        );
-        let u_avg = block_average(
-            &self.pixels.u,
-            chroma_w,
-            chroma_px_x,
-            chroma_px_y,
-            chroma_px,
-            chroma_w,
-            chroma_h,
-        );
-        let v_avg = block_average(
-            &self.pixels.v,
-            chroma_w,
-            chroma_px_x,
-            chroma_px_y,
-            chroma_px,
-            chroma_w,
-            chroma_h,
-        );
 
         let y_pred = self.ctx.dc_prediction(bx, by, bl, 0);
         let u_pred = self.ctx.dc_prediction(bx, by, bl, 1);
         let v_pred = self.ctx.dc_prediction(bx, by, bl, 2);
 
-        let (y_tok, y_neg) =
-            compute_dc_tok(y_avg, y_pred, params.luma_dq_shift, params.luma_itx_shift);
-        let (u_tok, u_neg) = compute_dc_tok(
-            u_avg,
-            u_pred,
-            params.chroma_dq_shift,
-            params.chroma_itx_shift,
-        );
-        let (v_tok, v_neg) = compute_dc_tok(
-            v_avg,
-            v_pred,
-            params.chroma_dq_shift,
-            params.chroma_itx_shift,
-        );
-        let is_skip = y_tok == 0 && u_tok == 0 && v_tok == 0;
+        let y_block = extract_block(&self.pixels.y, w, px_x, px_y, 8, w, h);
+        let u_block = extract_block(&self.pixels.u, cw, chroma_px_x, chroma_px_y, 4, cw, ch);
+        let v_block = extract_block(&self.pixels.v, cw, chroma_px_x, chroma_px_y, 4, cw, ch);
+
+        let mut y_residual = [0i32; 64];
+        for i in 0..64 {
+            y_residual[i] = y_block[i] as i32 - y_pred as i32;
+        }
+        let y_dct = dct::forward_dct_8x8(&y_residual);
+        let y_quant = quantize_coeffs(&y_dct, 64, DQ_DC_Q128, DQ_AC_Q128);
+
+        let mut u_residual = [0i32; 16];
+        for i in 0..16 {
+            u_residual[i] = u_block[i] as i32 - u_pred as i32;
+        }
+        let u_dct = dct::forward_dct_4x4(&u_residual);
+        let u_quant = quantize_coeffs(&u_dct, 16, DQ_DC_Q128, DQ_AC_Q128);
+
+        let mut v_residual = [0i32; 16];
+        for i in 0..16 {
+            v_residual[i] = v_block[i] as i32 - v_pred as i32;
+        }
+        let v_dct = dct::forward_dct_4x4(&v_residual);
+        let v_quant = quantize_coeffs(&v_dct, 16, DQ_DC_Q128, DQ_AC_Q128);
+
+        let is_skip = y_quant.iter().all(|&c| c == 0)
+            && u_quant.iter().all(|&c| c == 0)
+            && v_quant.iter().all(|&c| c == 0);
 
         let skip_ctx = self.ctx.skip_ctx(bx, by);
         self.enc.encode_bool(is_skip, &mut self.cdf.skip[skip_ctx]);
@@ -850,122 +856,196 @@ impl<'a> TileEncoder<'a> {
         self.enc
             .encode_symbol(0, &mut self.cdf.uv_mode[cfl_idx][0], uv_n_syms);
 
-        if !is_skip {
-            let l_eob = luma_eob_bin(bl);
-            let c_eob = chroma_eob_bin(bl);
+        let (y_cul, y_dc_neg, y_dc_zero);
+        let (u_cul, u_dc_neg, u_dc_zero);
+        let (v_cul, v_dc_neg, v_dc_zero);
 
+        if !is_skip {
             let y_txb_skip_ctx = 0;
             let y_dc_sign_ctx = self.ctx.dc_sign_ctx(bx, by, bl, 0);
-
-            if y_tok > 0 {
-                encode_plane_coeffs(
-                    &mut self.enc,
-                    &mut self.cdf,
-                    y_tok,
-                    y_neg,
-                    false,
-                    params.luma_t_dim_ctx,
-                    l_eob,
-                    y_txb_skip_ctx,
-                    y_dc_sign_ctx,
-                );
-            } else {
-                self.enc.encode_bool(
-                    true,
-                    &mut self.cdf.txb_skip[params.luma_t_dim_ctx][y_txb_skip_ctx],
-                );
-            }
+            let y_result = encode_transform_block(
+                &mut self.enc,
+                &mut self.cdf,
+                &y_quant,
+                &DEFAULT_SCAN_8X8,
+                false,
+                false,
+                1,
+                y_txb_skip_ctx,
+                y_dc_sign_ctx,
+            );
+            y_cul = y_result.0;
+            y_dc_neg = y_result.1;
+            y_dc_zero = y_result.2;
 
             let u_txb_skip_ctx = self.ctx.chroma_txb_skip_ctx(bx, by, bl, 1);
             let u_dc_sign_ctx = self.ctx.dc_sign_ctx(bx, by, bl, 1);
-
-            if u_tok > 0 {
-                encode_plane_coeffs(
-                    &mut self.enc,
-                    &mut self.cdf,
-                    u_tok,
-                    u_neg,
-                    true,
-                    params.chroma_t_dim_ctx,
-                    c_eob,
-                    u_txb_skip_ctx,
-                    u_dc_sign_ctx,
-                );
-            } else {
-                self.enc.encode_bool(
-                    true,
-                    &mut self.cdf.txb_skip[params.chroma_t_dim_ctx][u_txb_skip_ctx],
-                );
-            }
+            let u_result = encode_transform_block(
+                &mut self.enc,
+                &mut self.cdf,
+                &u_quant,
+                &DEFAULT_SCAN_4X4,
+                true,
+                false,
+                0,
+                u_txb_skip_ctx,
+                u_dc_sign_ctx,
+            );
+            u_cul = u_result.0;
+            u_dc_neg = u_result.1;
+            u_dc_zero = u_result.2;
 
             let v_txb_skip_ctx = self.ctx.chroma_txb_skip_ctx(bx, by, bl, 2);
             let v_dc_sign_ctx = self.ctx.dc_sign_ctx(bx, by, bl, 2);
+            let v_result = encode_transform_block(
+                &mut self.enc,
+                &mut self.cdf,
+                &v_quant,
+                &DEFAULT_SCAN_4X4,
+                true,
+                false,
+                0,
+                v_txb_skip_ctx,
+                v_dc_sign_ctx,
+            );
+            v_cul = v_result.0;
+            v_dc_neg = v_result.1;
+            v_dc_zero = v_result.2;
+        } else {
+            y_cul = 0;
+            y_dc_neg = false;
+            y_dc_zero = true;
+            u_cul = 0;
+            u_dc_neg = false;
+            u_dc_zero = true;
+            v_cul = 0;
+            v_dc_neg = false;
+            v_dc_zero = true;
+        }
 
-            if v_tok > 0 {
-                encode_plane_coeffs(
-                    &mut self.enc,
-                    &mut self.cdf,
-                    v_tok,
-                    v_neg,
-                    true,
-                    params.chroma_t_dim_ctx,
-                    c_eob,
-                    v_txb_skip_ctx,
-                    v_dc_sign_ctx,
-                );
-            } else {
-                self.enc.encode_bool(
-                    true,
-                    &mut self.cdf.txb_skip[params.chroma_t_dim_ctx][v_txb_skip_ctx],
-                );
+        let y_deq = dequantize_coeffs(&y_quant, 64, DQ_DC_Q128, DQ_AC_Q128);
+        let mut y_deq_arr = [0i32; 64];
+        y_deq_arr.copy_from_slice(&y_deq);
+        let y_recon_residual = dct::inverse_dct_8x8(&y_deq_arr);
+
+        for r in 0..8u32 {
+            for c in 0..8u32 {
+                let dest_x = px_x + c;
+                let dest_y = px_y + r;
+                if dest_x < w && dest_y < h {
+                    let pixel = (y_pred as i32 + y_recon_residual[(r * 8 + c) as usize]).clamp(0, 255) as u8;
+                    self.recon.y[(dest_y * w + dest_x) as usize] = pixel;
+                }
             }
         }
 
-        let recon_y = compute_reconstructed_dc(
-            y_pred,
-            y_tok,
-            y_neg,
-            params.luma_dq_shift,
-            params.luma_itx_shift,
-        );
-        let recon_u = compute_reconstructed_dc(
-            u_pred,
-            u_tok,
-            u_neg,
-            params.chroma_dq_shift,
-            params.chroma_itx_shift,
-        );
-        let recon_v = compute_reconstructed_dc(
-            v_pred,
-            v_tok,
-            v_neg,
-            params.chroma_dq_shift,
-            params.chroma_itx_shift,
-        );
+        let u_deq = dequantize_coeffs(&u_quant, 16, DQ_DC_Q128, DQ_AC_Q128);
+        let mut u_deq_arr = [0i32; 16];
+        u_deq_arr.copy_from_slice(&u_deq);
+        let u_recon_residual = dct::inverse_dct_4x4(&u_deq_arr);
+
+        for r in 0..4u32 {
+            for c in 0..4u32 {
+                let dest_x = chroma_px_x + c;
+                let dest_y = chroma_px_y + r;
+                if dest_x < cw && dest_y < ch {
+                    let pixel = (u_pred as i32 + u_recon_residual[(r * 4 + c) as usize]).clamp(0, 255) as u8;
+                    self.recon.u[(dest_y * cw + dest_x) as usize] = pixel;
+                }
+            }
+        }
+
+        let v_deq = dequantize_coeffs(&v_quant, 16, DQ_DC_Q128, DQ_AC_Q128);
+        let mut v_deq_arr = [0i32; 16];
+        v_deq_arr.copy_from_slice(&v_deq);
+        let v_recon_residual = dct::inverse_dct_4x4(&v_deq_arr);
+
+        for r in 0..4u32 {
+            for c in 0..4u32 {
+                let dest_x = chroma_px_x + c;
+                let dest_y = chroma_px_y + r;
+                if dest_x < cw && dest_y < ch {
+                    let pixel = (v_pred as i32 + v_recon_residual[(r * 4 + c) as usize]).clamp(0, 255) as u8;
+                    self.recon.v[(dest_y * cw + dest_x) as usize] = pixel;
+                }
+            }
+        }
+
+        let mut y_bottom_row = [128u8; 8];
+        let mut y_right_col = [128u8; 8];
+        for c in 0..8u32 {
+            let dest_x = px_x + c;
+            let dest_y = px_y + 7;
+            if dest_x < w && dest_y < h {
+                y_bottom_row[c as usize] = self.recon.y[(dest_y * w + dest_x) as usize];
+            }
+        }
+        for r in 0..8u32 {
+            let dest_x = px_x + 7;
+            let dest_y = px_y + r;
+            if dest_x < w && dest_y < h {
+                y_right_col[r as usize] = self.recon.y[(dest_y * w + dest_x) as usize];
+            }
+        }
+
+        let mut u_bottom_row = [128u8; 4];
+        let mut u_right_col = [128u8; 4];
+        for c in 0..4u32 {
+            let dest_x = chroma_px_x + c;
+            let dest_y = chroma_px_y + 3;
+            if dest_x < cw && dest_y < ch {
+                u_bottom_row[c as usize] = self.recon.u[(dest_y * cw + dest_x) as usize];
+            }
+        }
+        for r in 0..4u32 {
+            let dest_x = chroma_px_x + 3;
+            let dest_y = chroma_px_y + r;
+            if dest_x < cw && dest_y < ch {
+                u_right_col[r as usize] = self.recon.u[(dest_y * cw + dest_x) as usize];
+            }
+        }
+
+        let mut v_bottom_row = [128u8; 4];
+        let mut v_right_col = [128u8; 4];
+        for c in 0..4u32 {
+            let dest_x = chroma_px_x + c;
+            let dest_y = chroma_px_y + 3;
+            if dest_x < cw && dest_y < ch {
+                v_bottom_row[c as usize] = self.recon.v[(dest_y * cw + dest_x) as usize];
+            }
+        }
+        for r in 0..4u32 {
+            let dest_x = chroma_px_x + 3;
+            let dest_y = chroma_px_y + r;
+            if dest_x < cw && dest_y < ch {
+                v_right_col[r as usize] = self.recon.v[(dest_y * cw + dest_x) as usize];
+            }
+        }
 
         self.ctx.update_recon(
             bx,
             by,
-            bl,
             self.mi_cols,
             self.mi_rows,
-            recon_y,
-            recon_u,
-            recon_v,
+            &y_bottom_row,
+            &y_right_col,
+            &u_bottom_row,
+            &u_right_col,
+            &v_bottom_row,
+            &v_right_col,
         );
-        self.fill_recon(bx, by, bl, recon_y, recon_u, recon_v);
+        let y_cf_ctx = coef_ctx_value(y_cul, y_dc_neg, y_dc_zero);
+        let u_cf_ctx = coef_ctx_value(u_cul, u_dc_neg, u_dc_zero);
+        let v_cf_ctx = coef_ctx_value(v_cul, v_dc_neg, v_dc_zero);
         self.ctx.update_coef_ctx(
             bx,
             by,
             bl,
             self.mi_cols,
             self.mi_rows,
-            y_tok,
-            y_neg,
-            u_tok,
-            u_neg,
-            v_tok,
-            v_neg,
+            y_cf_ctx,
+            u_cf_ctx,
+            v_cf_ctx,
         );
         self.ctx
             .update_partition_ctx(bx, by, bl, self.mi_cols, self.mi_rows);
@@ -984,12 +1064,24 @@ impl<'a> TileEncoder<'a> {
 
         if have_h_split && have_v_split {
             let part_ctx = self.ctx.partition_ctx(bx, by, bl);
-            self.enc.encode_symbol(
-                0,
-                &mut self.cdf.partition[bl][part_ctx],
-                PARTITION_NSYMS[bl],
-            );
-            self.encode_block(bx, by, bl);
+            if bl < 4 {
+                self.enc.encode_symbol(
+                    3,
+                    &mut self.cdf.partition[bl][part_ctx],
+                    PARTITION_NSYMS[bl],
+                );
+                self.encode_partition(bl + 1, bx, by);
+                self.encode_partition(bl + 1, bx + hsz, by);
+                self.encode_partition(bl + 1, bx, by + hsz);
+                self.encode_partition(bl + 1, bx + hsz, by + hsz);
+            } else {
+                self.enc.encode_symbol(
+                    0,
+                    &mut self.cdf.partition[bl][part_ctx],
+                    PARTITION_NSYMS[bl],
+                );
+                self.encode_block(bx, by, bl);
+            }
         } else if have_h_split {
             let part_ctx = self.ctx.partition_ctx(bx, by, bl);
             let prob = gather_top_partition_prob(&self.cdf.partition[bl][part_ctx], bl);
@@ -1069,118 +1161,48 @@ impl<'a> InterTileEncoder<'a> {
         }
     }
 
-    fn fill_recon(&mut self, bx: u32, by: u32, bl: usize, recon_y: u8, recon_u: u8, recon_v: u8) {
-        let luma_px = 128u32 >> bl;
-        let chroma_px = luma_px / 2;
+    fn encode_inter_block(&mut self, bx: u32, by: u32, bl: usize) {
         let px_x = bx * 4;
         let px_y = by * 4;
-        let w = self.recon.width;
-        let h = self.recon.height;
+        let w = self.pixels.width;
+        let h = self.pixels.height;
         let cw = w.div_ceil(2);
         let ch = h.div_ceil(2);
-
-        let x_end = min(px_x + luma_px, w);
-        let y_end = min(px_y + luma_px, h);
-        for row in px_y..y_end {
-            let start = (row * w + px_x) as usize;
-            let end = (row * w + x_end) as usize;
-            self.recon.y[start..end].fill(recon_y);
-        }
-
-        let cpx_x = px_x / 2;
-        let cpx_y = px_y / 2;
-        let cx_end = min(cpx_x + chroma_px, cw);
-        let cy_end = min(cpx_y + chroma_px, ch);
-        for row in cpx_y..cy_end {
-            let start = (row * cw + cpx_x) as usize;
-            let end = (row * cw + cx_end) as usize;
-            self.recon.u[start..end].fill(recon_u);
-            self.recon.v[start..end].fill(recon_v);
-        }
-    }
-
-    fn encode_inter_block(&mut self, bx: u32, by: u32, bl: usize) {
-        let params = &BLOCK_PARAMS[bl];
-        let luma_px = 128u32 >> bl;
-        let chroma_px = luma_px / 2;
-        let px_x = bx * 4;
-        let px_y = by * 4;
         let chroma_px_x = px_x / 2;
         let chroma_px_y = px_y / 2;
-        let chroma_w = self.pixels.width.div_ceil(2);
-        let chroma_h = self.pixels.height.div_ceil(2);
 
-        let y_avg = block_average(
-            &self.pixels.y,
-            self.pixels.width,
-            px_x,
-            px_y,
-            luma_px,
-            self.pixels.width,
-            self.pixels.height,
-        );
-        let u_avg = block_average(
-            &self.pixels.u,
-            chroma_w,
-            chroma_px_x,
-            chroma_px_y,
-            chroma_px,
-            chroma_w,
-            chroma_h,
-        );
-        let v_avg = block_average(
-            &self.pixels.v,
-            chroma_w,
-            chroma_px_x,
-            chroma_px_y,
-            chroma_px,
-            chroma_w,
-            chroma_h,
-        );
+        let y_src = extract_block(&self.pixels.y, w, px_x, px_y, 8, w, h);
+        let u_src = extract_block(&self.pixels.u, cw, chroma_px_x, chroma_px_y, 4, cw, ch);
+        let v_src = extract_block(&self.pixels.v, cw, chroma_px_x, chroma_px_y, 4, cw, ch);
 
-        let y_ref = block_average(
-            &self.reference.y,
-            self.reference.width,
-            px_x,
-            px_y,
-            luma_px,
-            self.reference.width,
-            self.reference.height,
-        );
-        let u_ref = block_average(
-            &self.reference.u,
-            chroma_w,
-            chroma_px_x,
-            chroma_px_y,
-            chroma_px,
-            chroma_w,
-            chroma_h,
-        );
-        let v_ref = block_average(
-            &self.reference.v,
-            chroma_w,
-            chroma_px_x,
-            chroma_px_y,
-            chroma_px,
-            chroma_w,
-            chroma_h,
-        );
+        let y_ref_block = extract_block(&self.reference.y, w, px_x, px_y, 8, w, h);
+        let u_ref_block = extract_block(&self.reference.u, cw, chroma_px_x, chroma_px_y, 4, cw, ch);
+        let v_ref_block = extract_block(&self.reference.v, cw, chroma_px_x, chroma_px_y, 4, cw, ch);
 
-        let (y_tok, y_neg) =
-            compute_dc_tok(y_avg, y_ref, params.luma_dq_shift, params.luma_itx_shift);
-        let (u_tok, u_neg) = compute_dc_tok(
-            u_avg,
-            u_ref,
-            params.chroma_dq_shift,
-            params.chroma_itx_shift,
-        );
-        let (v_tok, v_neg) = compute_dc_tok(
-            v_avg,
-            v_ref,
-            params.chroma_dq_shift,
-            params.chroma_itx_shift,
-        );
-        let is_skip = y_tok == 0 && u_tok == 0 && v_tok == 0;
+        let mut y_residual = [0i32; 64];
+        for i in 0..64 {
+            y_residual[i] = y_src[i] as i32 - y_ref_block[i] as i32;
+        }
+        let y_dct = dct::forward_dct_8x8(&y_residual);
+        let y_quant = quantize_coeffs(&y_dct, 64, DQ_DC_Q128, DQ_AC_Q128);
+
+        let mut u_residual = [0i32; 16];
+        for i in 0..16 {
+            u_residual[i] = u_src[i] as i32 - u_ref_block[i] as i32;
+        }
+        let u_dct = dct::forward_dct_4x4(&u_residual);
+        let u_quant = quantize_coeffs(&u_dct, 16, DQ_DC_Q128, DQ_AC_Q128);
+
+        let mut v_residual = [0i32; 16];
+        for i in 0..16 {
+            v_residual[i] = v_src[i] as i32 - v_ref_block[i] as i32;
+        }
+        let v_dct = dct::forward_dct_4x4(&v_residual);
+        let v_quant = quantize_coeffs(&v_dct, 16, DQ_DC_Q128, DQ_AC_Q128);
+
+        let is_skip = y_quant.iter().all(|&c| c == 0)
+            && u_quant.iter().all(|&c| c == 0)
+            && v_quant.iter().all(|&c| c == 0);
 
         let skip_ctx = self.ctx.skip_ctx(bx, by);
         self.enc.encode_bool(is_skip, &mut self.cdf.skip[skip_ctx]);
@@ -1204,122 +1226,196 @@ impl<'a> InterTileEncoder<'a> {
         self.enc
             .encode_bool(false, &mut self.cdf.zeromv[zeromv_ctx]);
 
-        if !is_skip {
-            let l_eob = luma_eob_bin(bl);
-            let c_eob = chroma_eob_bin(bl);
+        let (y_cul, y_dc_neg, y_dc_zero);
+        let (u_cul, u_dc_neg, u_dc_zero);
+        let (v_cul, v_dc_neg, v_dc_zero);
 
+        if !is_skip {
             let y_txb_skip_ctx = 0;
             let y_dc_sign_ctx = self.ctx.dc_sign_ctx(bx, by, bl, 0);
-
-            if y_tok > 0 {
-                encode_plane_coeffs(
-                    &mut self.enc,
-                    &mut self.cdf,
-                    y_tok,
-                    y_neg,
-                    false,
-                    params.luma_t_dim_ctx,
-                    l_eob,
-                    y_txb_skip_ctx,
-                    y_dc_sign_ctx,
-                );
-            } else {
-                self.enc.encode_bool(
-                    true,
-                    &mut self.cdf.txb_skip[params.luma_t_dim_ctx][y_txb_skip_ctx],
-                );
-            }
+            let y_result = encode_transform_block(
+                &mut self.enc,
+                &mut self.cdf,
+                &y_quant,
+                &DEFAULT_SCAN_8X8,
+                false,
+                true,
+                1,
+                y_txb_skip_ctx,
+                y_dc_sign_ctx,
+            );
+            y_cul = y_result.0;
+            y_dc_neg = y_result.1;
+            y_dc_zero = y_result.2;
 
             let u_txb_skip_ctx = self.ctx.chroma_txb_skip_ctx(bx, by, bl, 1);
             let u_dc_sign_ctx = self.ctx.dc_sign_ctx(bx, by, bl, 1);
-
-            if u_tok > 0 {
-                encode_plane_coeffs(
-                    &mut self.enc,
-                    &mut self.cdf,
-                    u_tok,
-                    u_neg,
-                    true,
-                    params.chroma_t_dim_ctx,
-                    c_eob,
-                    u_txb_skip_ctx,
-                    u_dc_sign_ctx,
-                );
-            } else {
-                self.enc.encode_bool(
-                    true,
-                    &mut self.cdf.txb_skip[params.chroma_t_dim_ctx][u_txb_skip_ctx],
-                );
-            }
+            let u_result = encode_transform_block(
+                &mut self.enc,
+                &mut self.cdf,
+                &u_quant,
+                &DEFAULT_SCAN_4X4,
+                true,
+                true,
+                0,
+                u_txb_skip_ctx,
+                u_dc_sign_ctx,
+            );
+            u_cul = u_result.0;
+            u_dc_neg = u_result.1;
+            u_dc_zero = u_result.2;
 
             let v_txb_skip_ctx = self.ctx.chroma_txb_skip_ctx(bx, by, bl, 2);
             let v_dc_sign_ctx = self.ctx.dc_sign_ctx(bx, by, bl, 2);
+            let v_result = encode_transform_block(
+                &mut self.enc,
+                &mut self.cdf,
+                &v_quant,
+                &DEFAULT_SCAN_4X4,
+                true,
+                true,
+                0,
+                v_txb_skip_ctx,
+                v_dc_sign_ctx,
+            );
+            v_cul = v_result.0;
+            v_dc_neg = v_result.1;
+            v_dc_zero = v_result.2;
+        } else {
+            y_cul = 0;
+            y_dc_neg = false;
+            y_dc_zero = true;
+            u_cul = 0;
+            u_dc_neg = false;
+            u_dc_zero = true;
+            v_cul = 0;
+            v_dc_neg = false;
+            v_dc_zero = true;
+        }
 
-            if v_tok > 0 {
-                encode_plane_coeffs(
-                    &mut self.enc,
-                    &mut self.cdf,
-                    v_tok,
-                    v_neg,
-                    true,
-                    params.chroma_t_dim_ctx,
-                    c_eob,
-                    v_txb_skip_ctx,
-                    v_dc_sign_ctx,
-                );
-            } else {
-                self.enc.encode_bool(
-                    true,
-                    &mut self.cdf.txb_skip[params.chroma_t_dim_ctx][v_txb_skip_ctx],
-                );
+        let y_deq = dequantize_coeffs(&y_quant, 64, DQ_DC_Q128, DQ_AC_Q128);
+        let mut y_deq_arr = [0i32; 64];
+        y_deq_arr.copy_from_slice(&y_deq);
+        let y_recon_residual = dct::inverse_dct_8x8(&y_deq_arr);
+
+        for r in 0..8u32 {
+            for c in 0..8u32 {
+                let dest_x = px_x + c;
+                let dest_y = px_y + r;
+                if dest_x < w && dest_y < h {
+                    let pixel = (y_ref_block[(r * 8 + c) as usize] as i32 + y_recon_residual[(r * 8 + c) as usize]).clamp(0, 255) as u8;
+                    self.recon.y[(dest_y * w + dest_x) as usize] = pixel;
+                }
             }
         }
 
-        let recon_y = compute_reconstructed_dc(
-            y_ref,
-            y_tok,
-            y_neg,
-            params.luma_dq_shift,
-            params.luma_itx_shift,
-        );
-        let recon_u = compute_reconstructed_dc(
-            u_ref,
-            u_tok,
-            u_neg,
-            params.chroma_dq_shift,
-            params.chroma_itx_shift,
-        );
-        let recon_v = compute_reconstructed_dc(
-            v_ref,
-            v_tok,
-            v_neg,
-            params.chroma_dq_shift,
-            params.chroma_itx_shift,
-        );
+        let u_deq = dequantize_coeffs(&u_quant, 16, DQ_DC_Q128, DQ_AC_Q128);
+        let mut u_deq_arr = [0i32; 16];
+        u_deq_arr.copy_from_slice(&u_deq);
+        let u_recon_residual = dct::inverse_dct_4x4(&u_deq_arr);
+
+        for r in 0..4u32 {
+            for c in 0..4u32 {
+                let dest_x = chroma_px_x + c;
+                let dest_y = chroma_px_y + r;
+                if dest_x < cw && dest_y < ch {
+                    let pixel = (u_ref_block[(r * 4 + c) as usize] as i32 + u_recon_residual[(r * 4 + c) as usize]).clamp(0, 255) as u8;
+                    self.recon.u[(dest_y * cw + dest_x) as usize] = pixel;
+                }
+            }
+        }
+
+        let v_deq = dequantize_coeffs(&v_quant, 16, DQ_DC_Q128, DQ_AC_Q128);
+        let mut v_deq_arr = [0i32; 16];
+        v_deq_arr.copy_from_slice(&v_deq);
+        let v_recon_residual = dct::inverse_dct_4x4(&v_deq_arr);
+
+        for r in 0..4u32 {
+            for c in 0..4u32 {
+                let dest_x = chroma_px_x + c;
+                let dest_y = chroma_px_y + r;
+                if dest_x < cw && dest_y < ch {
+                    let pixel = (v_ref_block[(r * 4 + c) as usize] as i32 + v_recon_residual[(r * 4 + c) as usize]).clamp(0, 255) as u8;
+                    self.recon.v[(dest_y * cw + dest_x) as usize] = pixel;
+                }
+            }
+        }
+
+        let mut y_bottom_row = [128u8; 8];
+        let mut y_right_col = [128u8; 8];
+        for c in 0..8u32 {
+            let dest_x = px_x + c;
+            let dest_y = px_y + 7;
+            if dest_x < w && dest_y < h {
+                y_bottom_row[c as usize] = self.recon.y[(dest_y * w + dest_x) as usize];
+            }
+        }
+        for r in 0..8u32 {
+            let dest_x = px_x + 7;
+            let dest_y = px_y + r;
+            if dest_x < w && dest_y < h {
+                y_right_col[r as usize] = self.recon.y[(dest_y * w + dest_x) as usize];
+            }
+        }
+
+        let mut u_bottom_row = [128u8; 4];
+        let mut u_right_col = [128u8; 4];
+        for c in 0..4u32 {
+            let dest_x = chroma_px_x + c;
+            let dest_y = chroma_px_y + 3;
+            if dest_x < cw && dest_y < ch {
+                u_bottom_row[c as usize] = self.recon.u[(dest_y * cw + dest_x) as usize];
+            }
+        }
+        for r in 0..4u32 {
+            let dest_x = chroma_px_x + 3;
+            let dest_y = chroma_px_y + r;
+            if dest_x < cw && dest_y < ch {
+                u_right_col[r as usize] = self.recon.u[(dest_y * cw + dest_x) as usize];
+            }
+        }
+
+        let mut v_bottom_row = [128u8; 4];
+        let mut v_right_col = [128u8; 4];
+        for c in 0..4u32 {
+            let dest_x = chroma_px_x + c;
+            let dest_y = chroma_px_y + 3;
+            if dest_x < cw && dest_y < ch {
+                v_bottom_row[c as usize] = self.recon.v[(dest_y * cw + dest_x) as usize];
+            }
+        }
+        for r in 0..4u32 {
+            let dest_x = chroma_px_x + 3;
+            let dest_y = chroma_px_y + r;
+            if dest_x < cw && dest_y < ch {
+                v_right_col[r as usize] = self.recon.v[(dest_y * cw + dest_x) as usize];
+            }
+        }
 
         self.ctx.update_recon(
             bx,
             by,
-            bl,
             self.mi_cols,
             self.mi_rows,
-            recon_y,
-            recon_u,
-            recon_v,
+            &y_bottom_row,
+            &y_right_col,
+            &u_bottom_row,
+            &u_right_col,
+            &v_bottom_row,
+            &v_right_col,
         );
-        self.fill_recon(bx, by, bl, recon_y, recon_u, recon_v);
+        let y_cf_ctx = coef_ctx_value(y_cul, y_dc_neg, y_dc_zero);
+        let u_cf_ctx = coef_ctx_value(u_cul, u_dc_neg, u_dc_zero);
+        let v_cf_ctx = coef_ctx_value(v_cul, v_dc_neg, v_dc_zero);
         self.ctx.update_coef_ctx(
             bx,
             by,
             bl,
             self.mi_cols,
             self.mi_rows,
-            y_tok,
-            y_neg,
-            u_tok,
-            u_neg,
-            v_tok,
-            v_neg,
+            y_cf_ctx,
+            u_cf_ctx,
+            v_cf_ctx,
         );
         self.ctx
             .update_partition_ctx(bx, by, bl, self.mi_cols, self.mi_rows);
@@ -1340,12 +1436,24 @@ impl<'a> InterTileEncoder<'a> {
 
         if have_h_split && have_v_split {
             let part_ctx = self.ctx.partition_ctx(bx, by, bl);
-            self.enc.encode_symbol(
-                0,
-                &mut self.cdf.partition[bl][part_ctx],
-                PARTITION_NSYMS[bl],
-            );
-            self.encode_inter_block(bx, by, bl);
+            if bl < 4 {
+                self.enc.encode_symbol(
+                    3,
+                    &mut self.cdf.partition[bl][part_ctx],
+                    PARTITION_NSYMS[bl],
+                );
+                self.encode_inter_partition(bl + 1, bx, by);
+                self.encode_inter_partition(bl + 1, bx + hsz, by);
+                self.encode_inter_partition(bl + 1, bx, by + hsz);
+                self.encode_inter_partition(bl + 1, bx + hsz, by + hsz);
+            } else {
+                self.enc.encode_symbol(
+                    0,
+                    &mut self.cdf.partition[bl][part_ctx],
+                    PARTITION_NSYMS[bl],
+                );
+                self.encode_inter_block(bx, by, bl);
+            }
         } else if have_h_split {
             let part_ctx = self.ctx.partition_ctx(bx, by, bl);
             let prob = gather_top_partition_prob(&self.cdf.partition[bl][part_ctx], bl);
@@ -1401,36 +1509,6 @@ mod tests {
     fn encode_tile_solid(width: u32, height: u32, y: u8, u: u8, v: u8) -> Vec<u8> {
         let pixels = FramePixels::solid(width, height, y, u, v);
         encode_tile(&pixels)
-    }
-
-    #[test]
-    fn dc_tok_with_dc_pred_128_matches_legacy() {
-        let (tok, neg) = compute_dc_tok(0, 128, 2, 2);
-        assert!(tok > 0);
-        assert!(neg);
-
-        let (tok, neg) = compute_dc_tok(128, 128, 2, 2);
-        assert_eq!(tok, 0);
-        assert!(!neg);
-    }
-
-    #[test]
-    fn reconstructed_dc_roundtrips() {
-        for target in [0u8, 64, 128, 192, 255] {
-            let (tok, neg) = compute_dc_tok(target, 128, 2, 2);
-            let recon = compute_reconstructed_dc(128, tok, neg, 2, 2);
-            assert!(
-                (recon as i32 - target as i32).abs() <= 1,
-                "target={target} recon={recon}"
-            );
-        }
-    }
-
-    #[test]
-    fn reconstructed_dc_with_nondefault_pred() {
-        let (tok, neg) = compute_dc_tok(200, 190, 1, 2);
-        let recon = compute_reconstructed_dc(190, tok, neg, 1, 2);
-        assert!((recon as i32 - 200).abs() <= 1, "recon={recon}");
     }
 
     #[test]
@@ -1551,42 +1629,6 @@ mod tests {
     }
 
     #[test]
-    fn reconstructed_dc_all_block_levels() {
-        for &(dq_shift, itx_shift) in &[(2, 2), (1, 2), (0, 2), (0, 1), (0, 0)] {
-            let (tok, neg) = compute_dc_tok(200, 128, dq_shift, itx_shift);
-            let recon = compute_reconstructed_dc(128, tok, neg, dq_shift, itx_shift);
-            assert!(
-                (recon as i32 - 200).abs() <= 2,
-                "dq_shift={dq_shift} itx_shift={itx_shift} recon={recon}"
-            );
-        }
-    }
-
-    #[test]
-    fn block_average_full_block() {
-        let plane = vec![100u8; 64 * 64];
-        let avg = block_average(&plane, 64, 0, 0, 64, 64, 64);
-        assert_eq!(avg, 100);
-    }
-
-    #[test]
-    fn block_average_edge_clamp() {
-        let plane = vec![200u8; 10 * 10];
-        let avg = block_average(&plane, 10, 8, 8, 8, 10, 10);
-        assert_eq!(avg, 200);
-    }
-
-    #[test]
-    fn block_average_gradient() {
-        let mut plane = vec![0u8; 8 * 8];
-        for i in 0..64 {
-            plane[i] = i as u8;
-        }
-        let avg = block_average(&plane, 8, 0, 0, 8, 8, 8);
-        assert_eq!(avg, 32);
-    }
-
-    #[test]
     fn dc_prediction_no_neighbors() {
         let ctx = TileContext::new(32);
         assert_eq!(ctx.dc_prediction(0, 0, 1, 0), 128);
@@ -1595,18 +1637,22 @@ mod tests {
     #[test]
     fn dc_prediction_top_only() {
         let mut ctx = TileContext::new(32);
-        for i in 0..4 {
+        for i in 0..8 {
             ctx.above_recon_y[i] = 200;
         }
-        assert_eq!(ctx.dc_prediction(0, 2, 2, 0), 200);
+        assert_eq!(ctx.dc_prediction(0, 2, 4, 0), 200);
     }
 
     #[test]
     fn dc_prediction_both() {
         let mut ctx = TileContext::new(32);
-        ctx.above_recon_y[1] = 200;
-        ctx.left_recon_y[1] = 100;
-        assert_eq!(ctx.dc_prediction(2, 2, 2, 0), 150);
+        for i in 0..8 {
+            ctx.above_recon_y[8 + i] = 200;
+        }
+        for i in 0..8 {
+            ctx.left_recon_y[8 + i] = 100;
+        }
+        assert_eq!(ctx.dc_prediction(2, 2, 4, 0), 150);
     }
 
     #[test]
@@ -1791,6 +1837,75 @@ mod tests {
         }
         let reference = FramePixels::solid(64, 64, 128, 128, 128);
         let bytes = encode_inter_tile(&pixels, &reference);
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn eob_to_bin_values() {
+        assert_eq!(eob_to_bin(0), 0);
+        assert_eq!(eob_to_bin(1), 1);
+        assert_eq!(eob_to_bin(2), 2);
+        assert_eq!(eob_to_bin(3), 2);
+        assert_eq!(eob_to_bin(4), 3);
+        assert_eq!(eob_to_bin(7), 3);
+        assert_eq!(eob_to_bin(8), 4);
+        assert_eq!(eob_to_bin(15), 4);
+        assert_eq!(eob_to_bin(16), 5);
+        assert_eq!(eob_to_bin(31), 5);
+        assert_eq!(eob_to_bin(32), 6);
+        assert_eq!(eob_to_bin(63), 6);
+    }
+
+    #[test]
+    fn quantize_dequantize_roundtrip() {
+        let coeffs = vec![280i32, -176, 88, 0, -352, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let quant = quantize_coeffs(&coeffs, 16, DQ_DC_Q128, DQ_AC_Q128);
+        let deq = dequantize_coeffs(&quant, 16, DQ_DC_Q128, DQ_AC_Q128);
+        assert_eq!(deq[0], 280);
+        assert_eq!(deq[1], -176);
+    }
+
+    #[test]
+    fn encode_transform_block_all_zero() {
+        let mut enc = MsacEncoder::new();
+        let mut cdf = CdfContext::default();
+        let coeffs = vec![0i32; 16];
+        let (cul, dc_neg, dc_zero) = encode_transform_block(
+            &mut enc, &mut cdf, &coeffs, &DEFAULT_SCAN_4X4, false, false, 0, 0, 0,
+        );
+        assert_eq!(cul, 0);
+        assert!(!dc_neg);
+        assert!(dc_zero);
+    }
+
+    #[test]
+    fn encode_transform_block_dc_only() {
+        let mut enc = MsacEncoder::new();
+        let mut cdf = CdfContext::default();
+        let mut coeffs = vec![0i32; 64];
+        coeffs[0] = 2;
+        let (cul, dc_neg, dc_zero) = encode_transform_block(
+            &mut enc, &mut cdf, &coeffs, &DEFAULT_SCAN_8X8, false, false, 1, 0, 0,
+        );
+        assert!(cul > 0);
+        assert!(!dc_neg);
+        assert!(!dc_zero);
+    }
+
+    #[test]
+    fn encode_transform_block_with_ac() {
+        let mut enc = MsacEncoder::new();
+        let mut cdf = CdfContext::default();
+        let mut coeffs = vec![0i32; 64];
+        coeffs[0] = 5;
+        coeffs[1] = -2;
+        coeffs[8] = 1;
+        let (cul, _dc_neg, dc_zero) = encode_transform_block(
+            &mut enc, &mut cdf, &coeffs, &DEFAULT_SCAN_8X8, false, false, 1, 0, 0,
+        );
+        assert!(cul > 0);
+        assert!(!dc_zero);
+        let bytes = enc.finalize();
         assert!(!bytes.is_empty());
     }
 }
