@@ -26,7 +26,7 @@ fn main() {
     });
     let output_path = &args[5];
 
-    let output = wav1c::encode_av1_ivf_color(y, u, v);
+    let output = wav1c::encode_av1_ivf(y, u, v);
 
     let mut file = File::create(output_path).unwrap_or_else(|e| {
         eprintln!("Error creating {}: {}", output_path, e);
