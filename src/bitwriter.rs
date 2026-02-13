@@ -1,3 +1,4 @@
+#[derive(Default)]
 pub struct BitWriter {
     buf: Vec<u8>,
     current_byte: u8,
@@ -6,11 +7,7 @@ pub struct BitWriter {
 
 impl BitWriter {
     pub fn new() -> Self {
-        Self {
-            buf: Vec::new(),
-            current_byte: 0,
-            bits_in_current: 0,
-        }
+        Self::default()
     }
 
     pub fn write_bit(&mut self, bit: bool) {
@@ -24,6 +21,7 @@ impl BitWriter {
     }
 
     pub fn write_bits(&mut self, value: u64, n: u8) {
+        debug_assert!(n <= 64);
         for i in (0..n).rev() {
             self.write_bit((value >> i) & 1 == 1);
         }

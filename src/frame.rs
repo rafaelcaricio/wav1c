@@ -10,6 +10,7 @@ pub fn encode_frame() -> Vec<u8> {
     w.write_bit(false);
     w.write_bit(false);
     w.write_bit(false);
+
     w.write_bits(192, 8);
     w.write_bit(false);
     w.write_bit(false);
@@ -18,8 +19,10 @@ pub fn encode_frame() -> Vec<u8> {
     w.write_bit(false);
     w.write_bit(false);
     w.write_bit(false);
+
     w.write_bits(0, 6);
     w.write_bits(0, 6);
+
     w.write_bit(false);
     w.write_bit(false);
 
