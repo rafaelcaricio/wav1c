@@ -39,9 +39,29 @@
 - CLI: wav1c input.y4m -o output.ivf (multi-frame)
 - Validated 3-frame and 5-frame sequences up to 320x240
 
-## Phase 7: Inter Prediction & GoP [NEXT]
+## Phase 7: Inter Prediction & GoP [DONE]
 
-- Reference frame buffer management
-- ZERO_MV inter prediction (simplest inter mode)
-- GoP structure: keyframe every N frames, inter frames between
-- 2-second video at 25fps with 1-second GoP = 50 frames total
+- GLOBALMV inter prediction with IDENTITY transform
+- GoP encoding: keyframe + inter frames with LAST_FRAME reference
+- Reference frame buffer management (slot 0)
+- disable_cdf_update=1, error_resilient_mode=1 for inter frames
+- Neighbor-based newmv_ctx computation
+- Validated multi-frame GoP at various dimensions
+
+## Phase 8: DCT Transform Encoding [DONE]
+
+- Forward/Inverse 4x4 and 8x8 DCT integer transforms (matching dav1d)
+- Scan order tables (DEFAULT_SCAN_4X4, DEFAULT_SCAN_8X8)
+- Full multi-coefficient encoding: txb_skip → txtp → eob_bin → eob_hi_bit → eob_base_tok → base_tok → br_tok/hi_tok → signs → Golomb
+- Complete CDF tables for all coefficient coding symbols
+- Packed level_tok storage matching dav1d's flat levels layout
+- Quantization/dequantization with DC and AC dequant values
+- Per-pixel DC prediction with reconstructed border tracking
+- Validated with real images up to 640x480 (ffmpeg testsrc)
+
+## Phase 9: Rate Control & Quality [NEXT]
+
+- Adaptive quantization
+- Loop filter parameters
+- CDEF (Constrained Directional Enhancement Filter)
+- Rate control for target bitrate

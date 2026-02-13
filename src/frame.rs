@@ -44,6 +44,7 @@ pub fn encode_frame_with_recon(pixels: &FramePixels) -> (Vec<u8>, FramePixels) {
     write_loopfilter_params(&mut w);
 
     w.write_bit(false);
+    w.write_bit(true);
 
     let mut header_bytes = w.finalize();
     let (tile_data, recon) = crate::tile::encode_tile_with_recon(pixels);
@@ -140,7 +141,7 @@ pub fn encode_inter_frame_with_recon(
 
     w.write_bit(false);
     w.write_bit(false);
-    w.write_bit(false);
+    w.write_bit(true);
 
     for _ in 0..7 {
         w.write_bit(false);
@@ -201,6 +202,7 @@ mod tests {
         expected.write_bit(false);
 
         expected.write_bit(false);
+        expected.write_bit(true);
 
         let expected_header = expected.finalize();
         assert_eq!(&bytes[..expected_header.len()], &expected_header[..]);
@@ -268,6 +270,7 @@ mod tests {
         expected.write_bit(false);
 
         expected.write_bit(false);
+        expected.write_bit(true);
 
         let expected_header = expected.finalize();
         let pixels = FramePixels::solid(320, 240, 128, 128, 128);
@@ -323,7 +326,7 @@ mod tests {
 
         expected.write_bit(false);
         expected.write_bit(false);
-        expected.write_bit(false);
+        expected.write_bit(true);
 
         for _ in 0..7 {
             expected.write_bit(false);
