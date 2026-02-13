@@ -23,14 +23,15 @@
 - DC prediction context tracking across superblocks
 - Validated 1x1 to 1920x1080, including non-SB-aligned dimensions
 
-## Phase 5: Real Image Input (Single Intra Frame) [NEXT]
+## Phase 5: Real Image Input (Single Intra Frame) [DONE]
 
-- Y4M input file parsing
-- Per-block DC prediction with neighbor context
-- DC-only coefficients per block (quantized residuals)
-- Single intra frame of arbitrary image content
+- Y4M input file parsing (minimal parser, 4:2:0 only)
+- Per-block DC prediction with reconstructed neighbor context
+- Coefficient context tracking (dc_sign_ctx, txb_skip_ctx)
+- Frame boundary clamping for all context arrays
+- Validated with gradient patterns at various dimensions
 
-## Phase 6: Multi-Frame Encoding (All-Intra)
+## Phase 6: Multi-Frame Encoding (All-Intra) [NEXT]
 
 - Multiple frames (all keyframes)
 - Temporal delimiters between frames
