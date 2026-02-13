@@ -1,4 +1,5 @@
 use crate::bitwriter::BitWriter;
+use crate::y4m::FramePixels;
 
 const MAX_TILE_COLS: u32 = 64;
 const MAX_TILE_ROWS: u32 = 64;
@@ -13,12 +14,12 @@ fn tile_log2(blk_size: u32, target: u32) -> u32 {
     k
 }
 
-pub fn encode_frame(width: u32, height: u32, y: u8, u: u8, v: u8) -> Vec<u8> {
+pub fn encode_frame(pixels: &FramePixels) -> Vec<u8> {
     let base_q_idx: u8 = 128;
     let mut w = BitWriter::new();
 
-    let sbw = width.div_ceil(64);
-    let sbh = height.div_ceil(64);
+    let sbw = pixels.width.div_ceil(64);
+    let sbh = pixels.height.div_ceil(64);
 
     w.write_bit(false);
     w.write_bits(0, 2);
@@ -66,7 +67,7 @@ pub fn encode_frame(width: u32, height: u32, y: u8, u: u8, v: u8) -> Vec<u8> {
     w.write_bit(false);
 
     let mut header_bytes = w.finalize();
-    let tile_data = crate::tile::encode_tile(width, height, y, u, v);
+    let tile_data = crate::tile::encode_tile(pixels);
     header_bytes.extend_from_slice(&tile_data);
     header_bytes
 }
@@ -87,7 +88,8 @@ mod tests {
 
     #[test]
     fn frame_header_64x64_bit_layout() {
-        let bytes = encode_frame(64, 64, 128, 128, 128);
+        let pixels = FramePixels::solid(64, 64, 128, 128, 128);
+        let bytes = encode_frame(&pixels);
 
         let mut expected = BitWriter::new();
 
@@ -126,22 +128,27 @@ mod tests {
 
     #[test]
     fn frame_header_128x128_differs_from_64x64() {
-        let bytes_64 = encode_frame(64, 64, 128, 128, 128);
-        let bytes_128 = encode_frame(128, 128, 128, 128, 128);
+        let pixels_64 = FramePixels::solid(64, 64, 128, 128, 128);
+        let pixels_128 = FramePixels::solid(128, 128, 128, 128, 128);
+        let bytes_64 = encode_frame(&pixels_64);
+        let bytes_128 = encode_frame(&pixels_128);
 
         assert_ne!(bytes_64, bytes_128);
     }
 
     #[test]
     fn frame_header_starts_with_show_existing_frame_false() {
-        let bytes = encode_frame(64, 64, 128, 128, 128);
+        let pixels = FramePixels::solid(64, 64, 128, 128, 128);
+        let bytes = encode_frame(&pixels);
         assert_eq!(bytes[0] & 0x80, 0);
     }
 
     #[test]
     fn frame_for_nonzero_residual_is_larger() {
-        let skip_bytes = encode_frame(64, 64, 128, 128, 128);
-        let color_bytes = encode_frame(64, 64, 0, 0, 0);
+        let skip_pixels = FramePixels::solid(64, 64, 128, 128, 128);
+        let color_pixels = FramePixels::solid(64, 64, 0, 0, 0);
+        let skip_bytes = encode_frame(&skip_pixels);
+        let color_bytes = encode_frame(&color_pixels);
         assert!(color_bytes.len() > skip_bytes.len());
     }
 
@@ -183,7 +190,8 @@ mod tests {
         expected.write_bit(false);
 
         let expected_header = expected.finalize();
-        let bytes = encode_frame(320, 240, 128, 128, 128);
+        let pixels = FramePixels::solid(320, 240, 128, 128, 128);
+        let bytes = encode_frame(&pixels);
         assert_eq!(&bytes[..expected_header.len()], &expected_header[..]);
     }
 }
