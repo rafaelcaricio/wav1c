@@ -1,0 +1,12 @@
+[package]
+name = "wav1c-cli"
+version = "0.1.0"
+edition = "2024"
+authors = ["Rafael Caricio <rafael@caricio.com>"]
+
+[[bin]]
+name = "wav1c"
+path = "src/main.rs"
+
+[dependencies]
+wav1c = { path = "../wav1c" }

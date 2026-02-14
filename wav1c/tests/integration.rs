@@ -4,7 +4,7 @@ use std::process::Command;
 use wav1c::y4m::FramePixels;
 
 fn dav1d_path() -> Option<std::path::PathBuf> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../dav1d/build/tools/dav1d");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dav1d/build/tools/dav1d");
     if path.exists() {
         Some(path)
     } else {

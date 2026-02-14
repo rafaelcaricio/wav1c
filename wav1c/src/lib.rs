@@ -2,14 +2,21 @@ pub mod bitwriter;
 pub mod cdf;
 pub mod cdf_coef;
 pub mod dequant;
+pub mod encoder;
+pub mod error;
 pub mod frame;
 pub mod ivf;
 pub mod msac;
 pub mod obu;
+pub mod packet;
 pub mod rc;
 pub mod sequence;
 pub mod tile;
 pub mod y4m;
+
+pub use encoder::{Encoder, EncoderConfig};
+pub use error::EncoderError;
+pub use packet::{FrameType, Packet};
 
 pub const DEFAULT_BASE_Q_IDX: u8 = 128;
 pub const DEFAULT_KEYINT: usize = 25;
@@ -63,65 +70,19 @@ pub fn encode(frames: &[y4m::FramePixels], config: &EncodeConfig) -> Vec<u8> {
         );
     }
 
-    assert!((1..=4096).contains(&width), "width must be 1..=4096");
-    assert!((1..=2304).contains(&height), "height must be 1..=2304");
+    let mut enc = Encoder::new(width, height, EncoderConfig::from(config))
+        .expect("invalid encoder dimensions");
 
-    let gop_size = config.keyint;
     let mut output = Vec::new();
     ivf::write_ivf_header(&mut output, width as u16, height as u16, frames.len() as u32).unwrap();
 
-    let mut rate_ctrl = config.target_bitrate.map(|bitrate| {
-        rc::RateControl::new(bitrate, config.fps, width, height, config.keyint)
-    });
-
-    let mut reference: Option<y4m::FramePixels> = None;
-
     for (i, pixels) in frames.iter().enumerate() {
-        let is_keyframe = i % gop_size == 0;
-
-        let base_q_idx = match &mut rate_ctrl {
-            Some(rc) => rc.compute_qp(is_keyframe),
-            None => config.base_q_idx,
-        };
-        let dq = dequant::lookup_dequant(base_q_idx);
-
-        let td = obu::obu_wrap(obu::ObuType::TemporalDelimiter, &[]);
-        let seq = obu::obu_wrap(
-            obu::ObuType::SequenceHeader,
-            &sequence::encode_sequence_header(width, height),
-        );
-
-        let (frame_payload, recon) = if is_keyframe {
-            frame::encode_frame_with_recon(pixels, base_q_idx, dq)
-        } else {
-            frame::encode_inter_frame_with_recon(
-                pixels,
-                reference.as_ref().unwrap(),
-                0x01,
-                0,
-                base_q_idx,
-                dq,
-            )
-        };
-
-        reference = Some(recon);
-
-        let frm = obu::obu_wrap(obu::ObuType::Frame, &frame_payload);
-
-        if let Some(rc) = &mut rate_ctrl {
-            rc.update((frm.len() * 8) as u64, base_q_idx);
-        }
-
-        let mut frame_data = Vec::new();
-        frame_data.extend_from_slice(&td);
-        frame_data.extend_from_slice(&seq);
-        frame_data.extend_from_slice(&frm);
-
-        ivf::write_ivf_frame(&mut output, i as u64, &frame_data).unwrap();
+        enc.send_frame(pixels).expect("send_frame failed");
+        let packet = enc.receive_packet().expect("no packet after send_frame");
+        ivf::write_ivf_frame(&mut output, i as u64, &packet.data).unwrap();
     }
 
-    if let Some(rc) = &rate_ctrl {
-        let stats = rc.stats();
+    if let Some(stats) = enc.rate_control_stats() {
         eprintln!(
             "Rate control: target={}kbps, avg_qp={}, buffer={}%",
             stats.target_bitrate / 1000,
