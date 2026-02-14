@@ -1,3 +1,4 @@
+#[derive(Debug)]
 pub struct FramePixels {
     pub y: Vec<u8>,
     pub u: Vec<u8>,

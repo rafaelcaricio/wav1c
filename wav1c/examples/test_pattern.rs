@@ -30,7 +30,7 @@ fn create_test_y4m(
 }
 
 fn main() {
-    let dav1d = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../dav1d/build/tools/dav1d");
+    let dav1d = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dav1d/build/tools/dav1d");
     if !dav1d.exists() {
         eprintln!("dav1d not found");
         return;
