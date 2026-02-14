@@ -2,7 +2,8 @@
 name = "wav1c-cli"
 version = "0.1.0"
 edition = "2024"
-authors = ["Rafael Caricio <rafael@caricio.com>"]
+authors.workspace = true
+keywords.workspace = true
 
 [[bin]]
 name = "wav1c"
