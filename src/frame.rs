@@ -46,7 +46,7 @@ pub fn encode_frame_with_recon(
 
     w.write_bit(false);
 
-    write_loopfilter_params(&mut w);
+    write_loopfilter_params(&mut w, base_q_idx);
 
     w.write_bit(false);
     w.write_bit(true);
@@ -85,9 +85,18 @@ fn write_quant_params(w: &mut BitWriter, base_q_idx: u8) {
     w.write_bit(false);
 }
 
-fn write_loopfilter_params(w: &mut BitWriter) {
-    w.write_bits(0, 6);
-    w.write_bits(0, 6);
+fn loop_filter_level_for_qidx(base_q_idx: u8) -> u8 {
+    base_q_idx.saturating_sub(20).min(252) / 4
+}
+
+fn write_loopfilter_params(w: &mut BitWriter, base_q_idx: u8) {
+    let level = loop_filter_level_for_qidx(base_q_idx);
+    w.write_bits(level as u64, 6);
+    w.write_bits(level as u64, 6);
+    if level > 0 {
+        w.write_bits(level as u64, 6);
+        w.write_bits(level as u64, 6);
+    }
     w.write_bits(0, 3);
     w.write_bit(true);
     w.write_bit(false);
@@ -152,7 +161,7 @@ pub fn encode_inter_frame_with_recon(
 
     w.write_bit(false);
 
-    write_loopfilter_params(&mut w);
+    write_loopfilter_params(&mut w, base_q_idx);
 
     w.write_bit(false);
     w.write_bit(false);
@@ -171,6 +180,20 @@ pub fn encode_inter_frame_with_recon(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loop_filter_level_mapping() {
+        assert_eq!(loop_filter_level_for_qidx(0), 0);
+        assert_eq!(loop_filter_level_for_qidx(10), 0);
+        assert_eq!(loop_filter_level_for_qidx(20), 0);
+        assert_eq!(loop_filter_level_for_qidx(24), 1);
+        assert_eq!(loop_filter_level_for_qidx(128), 27);
+        assert_eq!(loop_filter_level_for_qidx(200), 45);
+        assert_eq!(loop_filter_level_for_qidx(255), 58);
+        for q in 0..=255u8 {
+            assert!(loop_filter_level_for_qidx(q) <= 63);
+        }
+    }
 
     #[test]
     fn tile_log2_basic() {
@@ -210,8 +233,10 @@ mod tests {
 
         expected.write_bit(false);
 
-        expected.write_bits(0, 6);
-        expected.write_bits(0, 6);
+        expected.write_bits(27, 6);
+        expected.write_bits(27, 6);
+        expected.write_bits(27, 6);
+        expected.write_bits(27, 6);
         expected.write_bits(0, 3);
         expected.write_bit(true);
         expected.write_bit(false);
@@ -278,8 +303,10 @@ mod tests {
 
         expected.write_bit(false);
 
-        expected.write_bits(0, 6);
-        expected.write_bits(0, 6);
+        expected.write_bits(27, 6);
+        expected.write_bits(27, 6);
+        expected.write_bits(27, 6);
+        expected.write_bits(27, 6);
         expected.write_bits(0, 3);
         expected.write_bit(true);
         expected.write_bit(false);
@@ -333,8 +360,10 @@ mod tests {
 
         expected.write_bit(false);
 
-        expected.write_bits(0, 6);
-        expected.write_bits(0, 6);
+        expected.write_bits(27, 6);
+        expected.write_bits(27, 6);
+        expected.write_bits(27, 6);
+        expected.write_bits(27, 6);
         expected.write_bits(0, 3);
         expected.write_bit(true);
         expected.write_bit(false);
