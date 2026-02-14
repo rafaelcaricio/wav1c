@@ -1,6 +1,6 @@
 [package]
 name = "wav1c-ffi"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "C FFI bindings for the wav1c AV1 encoder."
 license = "MPL-2.0"
@@ -12,4 +12,4 @@ keywords.workspace = true
 crate-type = ["cdylib", "staticlib", "lib"]
 
 [dependencies]
-wav1c = { path = "../wav1c", version = "0.1.0" }
+wav1c = { path = "../wav1c", version = "0.1.1" }

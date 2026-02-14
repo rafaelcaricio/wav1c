@@ -1,6 +1,6 @@
 [package]
 name = "wav1c-cli"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Command-line AV1 encoder powered by wav1c."
 license = "MPL-2.0"
@@ -13,4 +13,4 @@ name = "wav1c"
 path = "src/main.rs"
 
 [dependencies]
-wav1c = { path = "../wav1c", version = "0.1.0" }
+wav1c = { path = "../wav1c", version = "0.1.1" }
