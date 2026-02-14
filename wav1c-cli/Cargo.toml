@@ -2,6 +2,9 @@
 name = "wav1c-cli"
 version = "0.1.0"
 edition = "2024"
+description = "Command-line AV1 encoder powered by wav1c."
+license = "MPL-2.0"
+repository = "https://github.com/rafaelcaricio/wav1c"
 authors.workspace = true
 keywords.workspace = true
 
@@ -10,4 +13,4 @@ name = "wav1c"
 path = "src/main.rs"
 
 [dependencies]
-wav1c = { path = "../wav1c" }
+wav1c = { path = "../wav1c", version = "0.1.0" }
