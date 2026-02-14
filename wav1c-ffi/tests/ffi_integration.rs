@@ -8,13 +8,29 @@ use wav1c_ffi::{
 };
 
 fn dav1d_path() -> Option<std::path::PathBuf> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dav1d/build/tools/dav1d");
-    if path.exists() {
-        Some(path)
-    } else {
-        eprintln!("Skipping: dav1d not found at {:?}", path);
-        None
+    if let Ok(p) = std::env::var("DAV1D") {
+        let path = std::path::PathBuf::from(p);
+        if path.exists() {
+            return Some(path);
+        }
     }
+
+    if let Ok(output) = Command::new("which").arg("dav1d").output() {
+        if output.status.success() {
+            let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !p.is_empty() {
+                return Some(std::path::PathBuf::from(p));
+            }
+        }
+    }
+
+    let local = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dav1d/build/tools/dav1d");
+    if local.exists() {
+        return Some(local);
+    }
+
+    eprintln!("Skipping: dav1d not found (set DAV1D env var or install dav1d in PATH)");
+    None
 }
 
 fn write_test_ivf(width: u16, height: u16, frame_data: &[u8]) -> Vec<u8> {

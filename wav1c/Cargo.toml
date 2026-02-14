@@ -7,5 +7,6 @@ license = "MPL-2.0"
 repository = "https://github.com/rafaelcaricio/wav1c"
 authors.workspace = true
 keywords.workspace = true
+readme = "../README.md"
 
 [dependencies]

@@ -1,0 +1,290 @@
+diff --git a/configure b/configure
+index 998b0292b8..46e00888ae 100755
+--- a/configure
++++ b/configure
+@@ -282,6 +282,7 @@ External library support:
+   --enable-libssh          enable SFTP protocol via libssh [no]
+   --enable-libsvtav1       enable AV1 encoding via SVT [no]
+   --enable-libsvtjpegxs    enable JPEGXS encoding/decoding via SVT [no]
++  --enable-libwav1c        enable AV1 encoding via wav1c [no]
+   --enable-libtensorflow   enable TensorFlow as a DNN module backend
+                            for DNN based filters like sr [no]
+   --enable-libtesseract    enable Tesseract, needed for ocr filter [no]
+@@ -2026,6 +2027,7 @@ EXTERNAL_LIBRARY_LIST="
+     libssh
+     libsvtav1
+     libsvtjpegxs
++    libwav1c
+     libtensorflow
+     libtesseract
+     libtheora
+@@ -3730,6 +3732,7 @@ libspeex_encoder_deps="libspeex"
+ libspeex_encoder_select="audio_frame_queue"
+ libsvtav1_encoder_deps="libsvtav1"
+ libsvtjpegxs_encoder_deps="libsvtjpegxs"
++libwav1c_encoder_deps="libwav1c"
+ libsvtjpegxs_decoder_deps="libsvtjpegxs"
+ libsvtav1_encoder_select="dovi_rpuenc"
+ libtheora_encoder_deps="libtheora"
+@@ -7282,6 +7285,7 @@ enabled libspeex          && require_pkg_config libspeex speex speex/speex.h spe
+ enabled libsrt            && require_pkg_config libsrt "srt >= 1.3.0" srt/srt.h srt_socket
+ enabled libsvtav1         && require_pkg_config libsvtav1 "SvtAv1Enc >= 0.9.0" EbSvtAv1Enc.h svt_av1_enc_init_handle
+ enabled libsvtjpegxs      && require_pkg_config libsvtjpegxs "SvtJpegxs >= 0.10.0" SvtJpegxsEnc.h svt_jpeg_xs_encoder_init
++enabled libwav1c          && require libwav1c wav1c.h wav1c_encoder_new -lwav1c_ffi
+ enabled libtensorflow     && require libtensorflow tensorflow/c/c_api.h TF_Version -ltensorflow
+ enabled libtesseract      && require_pkg_config libtesseract tesseract tesseract/capi.h TessBaseAPICreate
+ enabled libtheora         && require libtheora theora/theoraenc.h th_info_init -ltheoraenc -ltheoradec -logg
+diff --git a/libavcodec/Makefile b/libavcodec/Makefile
+index 3d60347a19..96358857da 100644
+--- a/libavcodec/Makefile
++++ b/libavcodec/Makefile
+@@ -1207,6 +1207,7 @@ OBJS-$(CONFIG_LIBSPEEX_DECODER)           += libspeexdec.o
+ OBJS-$(CONFIG_LIBSPEEX_ENCODER)           += libspeexenc.o
+ OBJS-$(CONFIG_LIBSVTAV1_ENCODER)          += libsvtav1.o
+ OBJS-$(CONFIG_LIBSVTJPEGXS_DECODER)       += libsvtjpegxsdec.o
++OBJS-$(CONFIG_LIBWAV1C_ENCODER)           += libwav1c.o
+ OBJS-$(CONFIG_LIBSVTJPEGXS_ENCODER)       += libsvtjpegxsenc.o
+ OBJS-$(CONFIG_LIBTHEORA_ENCODER)          += libtheoraenc.o
+ OBJS-$(CONFIG_LIBTWOLAME_ENCODER)         += libtwolame.o
+diff --git a/libavcodec/allcodecs.c b/libavcodec/allcodecs.c
+index 042b07c895..d19aa5fec6 100644
+--- a/libavcodec/allcodecs.c
++++ b/libavcodec/allcodecs.c
+@@ -816,6 +816,7 @@ extern const FFCodec ff_libspeex_encoder;
+ extern const FFCodec ff_libspeex_decoder;
+ extern const FFCodec ff_libsvtav1_encoder;
+ extern const FFCodec ff_libsvtjpegxs_encoder;
++extern const FFCodec ff_libwav1c_encoder;
+ extern const FFCodec ff_libsvtjpegxs_decoder;
+ extern const FFCodec ff_libtheora_encoder;
+ extern const FFCodec ff_libtwolame_encoder;
+diff --git a/libavcodec/libwav1c.c b/libavcodec/libwav1c.c
+new file mode 100644
+index 0000000000..0d6e5b1a33
+--- /dev/null
++++ b/libavcodec/libwav1c.c
+@@ -0,0 +1,224 @@
++/*
++ * wav1c AV1 encoder wrapper for FFmpeg
++ *
++ * Copyright (c) 2026 Rafael Caricio
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++#include <wav1c.h>
++
++#include "libavutil/imgutils.h"
++#include "libavutil/mem.h"
++#include "libavutil/opt.h"
++
++#include "avcodec.h"
++#include "codec_internal.h"
++#include "encode.h"
++
++typedef enum {
++    WAV1C_EOS_NOT_REACHED = 0,
++    WAV1C_EOS_SENT,
++    WAV1C_EOS_RECEIVED,
++} Wav1cEosStatus;
++
++typedef struct Wav1cContext {
++    AVClass *class;
++    Wav1cEncoder *encoder;
++    AVFrame *frame;
++    Wav1cEosStatus eos_flag;
++
++    int base_q_idx;
++} Wav1cContext;
++
++static av_cold int wav1c_init(AVCodecContext *avctx)
++{
++    Wav1cContext *ctx = avctx->priv_data;
++    Wav1cConfig cfg;
++    const uint8_t *hdr_data;
++    size_t hdr_size;
++
++    cfg.base_q_idx = ctx->base_q_idx;
++    cfg.keyint = avctx->gop_size > 0 ? avctx->gop_size : 250;
++    cfg.target_bitrate = avctx->bit_rate > 0 ? avctx->bit_rate : 0;
++
++    if (avctx->framerate.num > 0 && avctx->framerate.den > 0)
++        cfg.fps = (double)avctx->framerate.num / avctx->framerate.den;
++    else if (avctx->time_base.num > 0 && avctx->time_base.den > 0)
++        cfg.fps = (double)avctx->time_base.den / avctx->time_base.num;
++    else
++        cfg.fps = 25.0;
++
++    ctx->encoder = wav1c_encoder_new(avctx->width, avctx->height, &cfg);
++    if (!ctx->encoder) {
++        av_log(avctx, AV_LOG_ERROR, "Failed to create wav1c encoder\n");
++        return AVERROR(EINVAL);
++    }
++
++    if (avctx->flags & AV_CODEC_FLAG_GLOBAL_HEADER) {
++        hdr_size = wav1c_encoder_headers(ctx->encoder, &hdr_data);
++        if (hdr_size > 0) {
++            avctx->extradata = av_mallocz(hdr_size + AV_INPUT_BUFFER_PADDING_SIZE);
++            if (!avctx->extradata) {
++                av_log(avctx, AV_LOG_ERROR, "Cannot allocate extradata\n");
++                return AVERROR(ENOMEM);
++            }
++            memcpy(avctx->extradata, hdr_data, hdr_size);
++            avctx->extradata_size = hdr_size;
++        }
++    }
++
++    ctx->frame = av_frame_alloc();
++    if (!ctx->frame)
++        return AVERROR(ENOMEM);
++
++    ctx->eos_flag = WAV1C_EOS_NOT_REACHED;
++
++    return 0;
++}
++
++static int wav1c_send_frame(AVCodecContext *avctx, const AVFrame *frame)
++{
++    Wav1cContext *ctx = avctx->priv_data;
++    int ret;
++    size_t y_size, uv_size;
++
++    if (!frame) {
++        if (ctx->eos_flag == WAV1C_EOS_SENT)
++            return 0;
++        wav1c_encoder_flush(ctx->encoder);
++        ctx->eos_flag = WAV1C_EOS_SENT;
++        return 0;
++    }
++
++    y_size = (size_t)frame->linesize[0] * avctx->height;
++    uv_size = (size_t)frame->linesize[1] * ((avctx->height + 1) / 2);
++
++    ret = wav1c_encoder_send_frame(ctx->encoder,
++                                   frame->data[0], y_size,
++                                   frame->data[1], uv_size,
++                                   frame->data[2], uv_size);
++    if (ret < 0) {
++        av_log(avctx, AV_LOG_ERROR, "Error sending frame to wav1c encoder\n");
++        return AVERROR_EXTERNAL;
++    }
++
++    return 0;
++}
++
++static int wav1c_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
++{
++    Wav1cContext *ctx = avctx->priv_data;
++    AVFrame *frame = ctx->frame;
++    Wav1cPacket *wav1c_pkt;
++    int ret;
++
++    if (ctx->eos_flag == WAV1C_EOS_RECEIVED)
++        return AVERROR_EOF;
++
++    ret = ff_encode_get_frame(avctx, frame);
++    if (ret < 0 && ret != AVERROR_EOF)
++        return ret;
++    if (ret == AVERROR_EOF)
++        frame = NULL;
++
++    ret = wav1c_send_frame(avctx, frame);
++    if (ret < 0)
++        return ret;
++    av_frame_unref(ctx->frame);
++
++    wav1c_pkt = wav1c_encoder_receive_packet(ctx->encoder);
++    if (!wav1c_pkt) {
++        if (ctx->eos_flag == WAV1C_EOS_SENT) {
++            ctx->eos_flag = WAV1C_EOS_RECEIVED;
++            return AVERROR_EOF;
++        }
++        return AVERROR(EAGAIN);
++    }
++
++    ret = av_new_packet(pkt, wav1c_pkt->size);
++    if (ret < 0) {
++        wav1c_packet_free(wav1c_pkt);
++        return ret;
++    }
++
++    memcpy(pkt->data, wav1c_pkt->data, wav1c_pkt->size);
++    pkt->pts = wav1c_pkt->frame_number;
++    pkt->dts = wav1c_pkt->frame_number;
++
++    if (wav1c_pkt->is_keyframe)
++        pkt->flags |= AV_PKT_FLAG_KEY;
++
++    wav1c_packet_free(wav1c_pkt);
++
++    return 0;
++}
++
++static av_cold int wav1c_close(AVCodecContext *avctx)
++{
++    Wav1cContext *ctx = avctx->priv_data;
++
++    if (ctx->encoder) {
++        wav1c_encoder_free(ctx->encoder);
++        ctx->encoder = NULL;
++    }
++
++    av_frame_free(&ctx->frame);
++
++    return 0;
++}
++
++#define OFFSET(x) offsetof(Wav1cContext, x)
++#define VE AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_ENCODING_PARAM
++
++static const AVOption wav1c_options[] = {
++    { "wav1c-q", "Quantizer (0-255, lower is higher quality)",
++      OFFSET(base_q_idx), AV_OPT_TYPE_INT, { .i64 = 128 }, 0, 255, VE },
++    { NULL },
++};
++
++static const AVClass wav1c_class = {
++    .class_name = "libwav1c",
++    .item_name  = av_default_item_name,
++    .option     = wav1c_options,
++    .version    = LIBAVUTIL_VERSION_INT,
++};
++
++static const FFCodecDefault wav1c_defaults[] = {
++    { "b", "0" },
++    { "g", "250" },
++    { NULL },
++};
++
++const FFCodec ff_libwav1c_encoder = {
++    .p.name         = "libwav1c",
++    CODEC_LONG_NAME("wav1c AV1 encoder"),
++    .priv_data_size = sizeof(Wav1cContext),
++    .p.type         = AVMEDIA_TYPE_VIDEO,
++    .p.id           = AV_CODEC_ID_AV1,
++    .init           = wav1c_init,
++    FF_CODEC_RECEIVE_PACKET_CB(wav1c_receive_packet),
++    .close          = wav1c_close,
++    .p.capabilities = AV_CODEC_CAP_DELAY,
++    .caps_internal  = FF_CODEC_CAP_NOT_INIT_THREADSAFE |
++                      FF_CODEC_CAP_INIT_CLEANUP,
++    CODEC_PIXFMTS(AV_PIX_FMT_YUV420P),
++    .color_ranges   = AVCOL_RANGE_MPEG,
++    .p.priv_class   = &wav1c_class,
++    .defaults       = wav1c_defaults,
++    .p.wrapper_name = "libwav1c",
++};
