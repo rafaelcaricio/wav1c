@@ -556,7 +556,7 @@ impl TileContext {
         }
     }
 
-    fn dc_prediction(&self, bx: u32, by: u32, _bl: usize, plane: usize) -> u8 {
+    fn dc_prediction(&self, bx: u32, by: u32, bl: usize, plane: usize) -> u8 {
         let have_top = by > 0;
         let have_left = bx > 0;
 
@@ -565,14 +565,16 @@ impl TileContext {
         }
 
         let (above_recon, left_recon, px_x, left_local_py, block_pixels) = if plane == 0 {
+            let bp = 1usize << (7 - bl);
             (
                 &self.above_recon_y[..],
                 &self.left_recon_y[..],
                 (bx * 4) as usize,
                 ((by & 15) * 4) as usize,
-                8usize,
+                bp,
             )
         } else {
+            let bp = 1usize << (6 - bl);
             let above = if plane == 1 {
                 &self.above_recon_u[..]
             } else {
@@ -588,7 +590,7 @@ impl TileContext {
                 left,
                 (bx * 2) as usize,
                 ((by & 15) * 2) as usize,
-                4usize,
+                bp,
             )
         };
 
@@ -651,12 +653,12 @@ impl TileContext {
         let max_py = (mi_rows * 4) as usize;
         let py_abs = (by * 4) as usize;
 
-        for i in 0..8 {
+        for i in 0..y_bottom_row.len() {
             if px_x + i < max_px_x && px_x + i < self.above_recon_y.len() {
                 self.above_recon_y[px_x + i] = y_bottom_row[i];
             }
         }
-        for i in 0..8 {
+        for i in 0..y_right_col.len() {
             if py_abs + i < max_py && py_local + i < self.left_recon_y.len() {
                 self.left_recon_y[py_local + i] = y_right_col[i];
             }
@@ -668,13 +670,13 @@ impl TileContext {
         let cpy_abs = (by * 2) as usize;
         let max_cpy = (mi_rows * 2) as usize;
 
-        for i in 0..4 {
+        for i in 0..u_bottom_row.len() {
             if cpx + i < max_cpx && cpx + i < self.above_recon_u.len() {
                 self.above_recon_u[cpx + i] = u_bottom_row[i];
                 self.above_recon_v[cpx + i] = v_bottom_row[i];
             }
         }
-        for i in 0..4 {
+        for i in 0..u_right_col.len() {
             if cpy_abs + i < max_cpy && cpy_local + i < self.left_recon_u.len() {
                 self.left_recon_u[cpy_local + i] = u_right_col[i];
                 self.left_recon_v[cpy_local + i] = v_right_col[i];
@@ -1053,6 +1055,122 @@ impl<'a> TileEncoder<'a> {
             .update_skip_ctx(bx, by, bl, self.mi_cols, self.mi_rows, is_skip);
     }
 
+    fn skip_mse(&self, bx: u32, by: u32, bl: usize) -> u64 {
+        let px_x = bx * 4;
+        let px_y = by * 4;
+        let block_size = 1u32 << (7 - bl);
+        let w = self.pixels.width;
+        let h = self.pixels.height;
+
+        let y_pred = self.ctx.dc_prediction(bx, by, bl, 0) as i64;
+
+        let mut sse = 0u64;
+        let mut count = 0u64;
+        for r in 0..block_size {
+            for c in 0..block_size {
+                let sy = min(px_y + r, h - 1);
+                let sx = min(px_x + c, w - 1);
+                let val = self.pixels.y[(sy * w + sx) as usize] as i64;
+                let diff = val - y_pred;
+                sse += (diff * diff) as u64;
+                count += 1;
+            }
+        }
+
+        sse / count.max(1)
+    }
+
+    fn should_use_partition_none(&self, bx: u32, by: u32, bl: usize) -> bool {
+        let threshold = (self.dq.ac as u64 * self.dq.ac as u64) / 64;
+        self.skip_mse(bx, by, bl) <= threshold
+    }
+
+    fn encode_skip_block(&mut self, bx: u32, by: u32, bl: usize) {
+        let px_x = bx * 4;
+        let px_y = by * 4;
+        let block_size = 1u32 << (7 - bl);
+        let chroma_size = block_size / 2;
+        let w = self.pixels.width;
+        let h = self.pixels.height;
+        let cw = w.div_ceil(2);
+        let ch = h.div_ceil(2);
+        let cpx = px_x / 2;
+        let cpy = px_y / 2;
+
+        let y_pred = self.ctx.dc_prediction(bx, by, bl, 0);
+        let u_pred = self.ctx.dc_prediction(bx, by, bl, 1);
+        let v_pred = self.ctx.dc_prediction(bx, by, bl, 2);
+
+        let skip_ctx = self.ctx.skip_ctx(bx, by);
+        self.enc.encode_bool(true, &mut self.cdf.skip[skip_ctx]);
+
+        self.enc
+            .encode_symbol(0, &mut self.cdf.kf_y_mode[0][0], 12);
+
+        let cfl_allowed = bl >= 2;
+        let uv_n_syms = if cfl_allowed { 13 } else { 12 };
+        let cfl_idx = usize::from(cfl_allowed);
+        self.enc
+            .encode_symbol(0, &mut self.cdf.uv_mode[cfl_idx][0], uv_n_syms);
+
+        for r in 0..block_size {
+            for c in 0..block_size {
+                let dest_x = px_x + c;
+                let dest_y = px_y + r;
+                if dest_x < w && dest_y < h {
+                    self.recon.y[(dest_y * w + dest_x) as usize] = y_pred;
+                }
+            }
+        }
+        for r in 0..chroma_size {
+            for c in 0..chroma_size {
+                let dest_x = cpx + c;
+                let dest_y = cpy + r;
+                if dest_x < cw && dest_y < ch {
+                    self.recon.u[(dest_y * cw + dest_x) as usize] = u_pred;
+                    self.recon.v[(dest_y * cw + dest_x) as usize] = v_pred;
+                }
+            }
+        }
+
+        let y_bp = block_size as usize;
+        let c_bp = chroma_size as usize;
+        let y_bottom = vec![y_pred; y_bp];
+        let y_right = vec![y_pred; y_bp];
+        let u_bottom = vec![u_pred; c_bp];
+        let u_right = vec![u_pred; c_bp];
+        let v_bottom = vec![v_pred; c_bp];
+        let v_right = vec![v_pred; c_bp];
+
+        self.ctx.update_recon(
+            bx,
+            by,
+            self.mi_cols,
+            self.mi_rows,
+            &y_bottom,
+            &y_right,
+            &u_bottom,
+            &u_right,
+            &v_bottom,
+            &v_right,
+        );
+        let skip_cf = coef_ctx_value(0, false, true);
+        self.ctx.update_coef_ctx(
+            bx,
+            by,
+            bl,
+            self.mi_cols,
+            self.mi_rows,
+            skip_cf,
+            skip_cf,
+            skip_cf,
+        );
+        self.ctx
+            .update_partition_ctx(bx, by, bl, self.mi_cols, self.mi_rows);
+        self.ctx
+            .update_skip_ctx(bx, by, bl, self.mi_cols, self.mi_rows, true);
+    }
+
     fn encode_partition(&mut self, bl: usize, bx: u32, by: u32) {
         if bl > 4 {
             return;
@@ -1065,15 +1183,24 @@ impl<'a> TileEncoder<'a> {
         if have_h_split && have_v_split {
             let part_ctx = self.ctx.partition_ctx(bx, by, bl);
             if bl < 4 {
-                self.enc.encode_symbol(
-                    3,
-                    &mut self.cdf.partition[bl][part_ctx],
-                    PARTITION_NSYMS[bl],
-                );
-                self.encode_partition(bl + 1, bx, by);
-                self.encode_partition(bl + 1, bx + hsz, by);
-                self.encode_partition(bl + 1, bx, by + hsz);
-                self.encode_partition(bl + 1, bx + hsz, by + hsz);
+                if bl >= 2 && self.should_use_partition_none(bx, by, bl) {
+                    self.enc.encode_symbol(
+                        0,
+                        &mut self.cdf.partition[bl][part_ctx],
+                        PARTITION_NSYMS[bl],
+                    );
+                    self.encode_skip_block(bx, by, bl);
+                } else {
+                    self.enc.encode_symbol(
+                        3,
+                        &mut self.cdf.partition[bl][part_ctx],
+                        PARTITION_NSYMS[bl],
+                    );
+                    self.encode_partition(bl + 1, bx, by);
+                    self.encode_partition(bl + 1, bx + hsz, by);
+                    self.encode_partition(bl + 1, bx, by + hsz);
+                    self.encode_partition(bl + 1, bx + hsz, by + hsz);
+                }
             } else {
                 self.enc.encode_symbol(
                     0,
@@ -1428,6 +1555,157 @@ impl<'a> InterTileEncoder<'a> {
             .update_intra_ctx(bx, by, bl, self.mi_cols, self.mi_rows, false);
     }
 
+    fn inter_skip_mse(&self, bx: u32, by: u32, bl: usize) -> u64 {
+        let px_x = bx * 4;
+        let px_y = by * 4;
+        let block_size = 1u32 << (7 - bl);
+        let w = self.pixels.width;
+        let h = self.pixels.height;
+
+        let mut sse = 0u64;
+        let mut count = 0u64;
+        for r in 0..block_size {
+            for c in 0..block_size {
+                let sy = min(px_y + r, h - 1);
+                let sx = min(px_x + c, w - 1);
+                let idx = (sy * w + sx) as usize;
+                let diff = self.pixels.y[idx] as i64 - self.reference.y[idx] as i64;
+                sse += (diff * diff) as u64;
+                count += 1;
+            }
+        }
+
+        sse / count.max(1)
+    }
+
+    fn should_use_inter_partition_none(&self, bx: u32, by: u32, bl: usize) -> bool {
+        let threshold = (self.dq.ac as u64 * self.dq.ac as u64) / 64;
+        self.inter_skip_mse(bx, by, bl) <= threshold
+    }
+
+    fn encode_inter_skip_block(&mut self, bx: u32, by: u32, bl: usize) {
+        let px_x = bx * 4;
+        let px_y = by * 4;
+        let block_size = 1u32 << (7 - bl);
+        let chroma_size = block_size / 2;
+        let w = self.pixels.width;
+        let h = self.pixels.height;
+        let cw = w.div_ceil(2);
+        let ch = h.div_ceil(2);
+        let cpx = px_x / 2;
+        let cpy = px_y / 2;
+
+        let skip_ctx = self.ctx.skip_ctx(bx, by);
+        self.enc.encode_bool(true, &mut self.cdf.skip[skip_ctx]);
+
+        let is_inter_ctx = self.ctx.is_inter_ctx(bx, by);
+        self.enc
+            .encode_bool(true, &mut self.cdf.is_inter[is_inter_ctx]);
+
+        let ref_ctx = self.ctx.ref_ctx(bx, by);
+        self.enc
+            .encode_bool(false, &mut self.cdf.single_ref[ref_ctx][0]);
+        self.enc
+            .encode_bool(false, &mut self.cdf.single_ref[ref_ctx][2]);
+        self.enc
+            .encode_bool(false, &mut self.cdf.single_ref[ref_ctx][3]);
+
+        let newmv_ctx = self.ctx.newmv_ctx(bx, by);
+        self.enc.encode_bool(true, &mut self.cdf.newmv[newmv_ctx]);
+
+        let zeromv_ctx = 0usize;
+        self.enc
+            .encode_bool(false, &mut self.cdf.zeromv[zeromv_ctx]);
+
+        for r in 0..block_size {
+            for c in 0..block_size {
+                let dest_x = px_x + c;
+                let dest_y = px_y + r;
+                if dest_x < w && dest_y < h {
+                    let idx = (dest_y * w + dest_x) as usize;
+                    self.recon.y[idx] = self.reference.y[idx];
+                }
+            }
+        }
+        for r in 0..chroma_size {
+            for c in 0..chroma_size {
+                let dest_x = cpx + c;
+                let dest_y = cpy + r;
+                if dest_x < cw && dest_y < ch {
+                    let idx = (dest_y * cw + dest_x) as usize;
+                    self.recon.u[idx] = self.reference.u[idx];
+                    self.recon.v[idx] = self.reference.v[idx];
+                }
+            }
+        }
+
+        let y_bp = block_size as usize;
+        let c_bp = chroma_size as usize;
+        let mut y_bottom = vec![128u8; y_bp];
+        let mut y_right = vec![128u8; y_bp];
+        let mut u_bottom = vec![128u8; c_bp];
+        let mut u_right = vec![128u8; c_bp];
+        let mut v_bottom = vec![128u8; c_bp];
+        let mut v_right = vec![128u8; c_bp];
+
+        for i in 0..y_bp {
+            let dest_x = px_x + (block_size - 1);
+            let dest_y = px_y + i as u32;
+            if dest_x < w && dest_y < h {
+                y_right[i] = self.recon.y[(dest_y * w + dest_x) as usize];
+            }
+            let dest_x2 = px_x + i as u32;
+            let dest_y2 = px_y + (block_size - 1);
+            if dest_x2 < w && dest_y2 < h {
+                y_bottom[i] = self.recon.y[(dest_y2 * w + dest_x2) as usize];
+            }
+        }
+        for i in 0..c_bp {
+            let dest_x = cpx + (chroma_size - 1);
+            let dest_y = cpy + i as u32;
+            if dest_x < cw && dest_y < ch {
+                u_right[i] = self.recon.u[(dest_y * cw + dest_x) as usize];
+                v_right[i] = self.recon.v[(dest_y * cw + dest_x) as usize];
+            }
+            let dest_x2 = cpx + i as u32;
+            let dest_y2 = cpy + (chroma_size - 1);
+            if dest_x2 < cw && dest_y2 < ch {
+                u_bottom[i] = self.recon.u[(dest_y2 * cw + dest_x2) as usize];
+                v_bottom[i] = self.recon.v[(dest_y2 * cw + dest_x2) as usize];
+            }
+        }
+
+        self.ctx.update_recon(
+            bx,
+            by,
+            self.mi_cols,
+            self.mi_rows,
+            &y_bottom,
+            &y_right,
+            &u_bottom,
+            &u_right,
+            &v_bottom,
+            &v_right,
+        );
+        let skip_cf = coef_ctx_value(0, false, true);
+        self.ctx.update_coef_ctx(
+            bx,
+            by,
+            bl,
+            self.mi_cols,
+            self.mi_rows,
+            skip_cf,
+            skip_cf,
+            skip_cf,
+        );
+        self.ctx
+            .update_partition_ctx(bx, by, bl, self.mi_cols, self.mi_rows);
+        self.ctx
+            .update_skip_ctx(bx, by, bl, self.mi_cols, self.mi_rows, true);
+        self.ctx
+            .update_intra_ctx(bx, by, bl, self.mi_cols, self.mi_rows, false);
+    }
+
     fn encode_inter_partition(&mut self, bl: usize, bx: u32, by: u32) {
         if bl > 4 {
             return;
@@ -1440,15 +1718,24 @@ impl<'a> InterTileEncoder<'a> {
         if have_h_split && have_v_split {
             let part_ctx = self.ctx.partition_ctx(bx, by, bl);
             if bl < 4 {
-                self.enc.encode_symbol(
-                    3,
-                    &mut self.cdf.partition[bl][part_ctx],
-                    PARTITION_NSYMS[bl],
-                );
-                self.encode_inter_partition(bl + 1, bx, by);
-                self.encode_inter_partition(bl + 1, bx + hsz, by);
-                self.encode_inter_partition(bl + 1, bx, by + hsz);
-                self.encode_inter_partition(bl + 1, bx + hsz, by + hsz);
+                if bl >= 2 && self.should_use_inter_partition_none(bx, by, bl) {
+                    self.enc.encode_symbol(
+                        0,
+                        &mut self.cdf.partition[bl][part_ctx],
+                        PARTITION_NSYMS[bl],
+                    );
+                    self.encode_inter_skip_block(bx, by, bl);
+                } else {
+                    self.enc.encode_symbol(
+                        3,
+                        &mut self.cdf.partition[bl][part_ctx],
+                        PARTITION_NSYMS[bl],
+                    );
+                    self.encode_inter_partition(bl + 1, bx, by);
+                    self.encode_inter_partition(bl + 1, bx + hsz, by);
+                    self.encode_inter_partition(bl + 1, bx, by + hsz);
+                    self.encode_inter_partition(bl + 1, bx + hsz, by + hsz);
+                }
             } else {
                 self.enc.encode_symbol(
                     0,
