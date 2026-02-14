@@ -110,13 +110,37 @@ cc -o encode -I wav1c-ffi/include wav1c-ffi/examples/encode.c \
    -L target/release -lwav1c_ffi
 ```
 
+## FFmpeg Integration
+
+A patch is included to add wav1c as an FFmpeg external encoder (`-c:v libwav1c`).
+
+```bash
+# Build the wav1c static library
+cargo build -p wav1c-ffi --release
+
+# Clone and patch FFmpeg
+git clone https://git.ffmpeg.org/ffmpeg.git
+cd ffmpeg
+git apply /path/to/wav1c/ffmpeg-libwav1c.patch
+
+# Configure with libwav1c (adjust library path as needed)
+./configure --enable-libwav1c \
+  --extra-cflags="-I/path/to/wav1c/wav1c-ffi/include" \
+  --extra-ldflags="-L/path/to/wav1c/target/release"
+
+make -j$(nproc)
+
+# Encode
+./ffmpeg -i input.y4m -c:v libwav1c -wav1c-q 128 output.mp4
+```
+
 ## Test
 
 ```bash
 cargo test --workspace
 ```
 
-Integration tests decode output with dav1d and verify pixel accuracy. They require dav1d built at `../dav1d/build/tools/dav1d` and will skip gracefully if not found.
+Integration tests decode output with [dav1d](https://code.videolan.org/videolan/dav1d) and verify pixel accuracy. Install dav1d and ensure it is available in your `PATH`, or set the `DAV1D` environment variable to point to the binary. Tests will skip gracefully if dav1d is not found.
 
 ## License
 

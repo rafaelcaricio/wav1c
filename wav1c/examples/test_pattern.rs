@@ -1,5 +1,30 @@
 use wav1c::y4m::FramePixels;
 
+fn find_dav1d() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("DAV1D") {
+        let path = std::path::PathBuf::from(p);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    if let Ok(output) = std::process::Command::new("which").arg("dav1d").output() {
+        if output.status.success() {
+            let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !p.is_empty() {
+                return Some(std::path::PathBuf::from(p));
+            }
+        }
+    }
+
+    let local = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dav1d/build/tools/dav1d");
+    if local.exists() {
+        return Some(local);
+    }
+
+    None
+}
+
 fn create_test_y4m(
     width: u32,
     height: u32,
@@ -30,11 +55,11 @@ fn create_test_y4m(
 }
 
 fn main() {
-    let dav1d = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dav1d/build/tools/dav1d");
-    if !dav1d.exists() {
-        eprintln!("dav1d not found");
+    let dav1d = find_dav1d();
+    let Some(dav1d) = dav1d else {
+        eprintln!("dav1d not found (set DAV1D env var or install dav1d in PATH)");
         return;
-    }
+    };
 
     test_pattern(&dav1d, "only_u_gradient", 320, 240, |col, _row| {
         let u = ((col * 256 / 320) as u8).min(255);
