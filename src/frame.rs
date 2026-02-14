@@ -1,4 +1,5 @@
 use crate::bitwriter::BitWriter;
+use crate::dequant::DequantValues;
 use crate::y4m::FramePixels;
 
 const MAX_TILE_COLS: u32 = 64;
@@ -15,11 +16,15 @@ fn tile_log2(blk_size: u32, target: u32) -> u32 {
 }
 
 pub fn encode_frame(pixels: &FramePixels) -> Vec<u8> {
-    encode_frame_with_recon(pixels).0
+    let dq = crate::dequant::lookup_dequant(crate::DEFAULT_BASE_Q_IDX);
+    encode_frame_with_recon(pixels, crate::DEFAULT_BASE_Q_IDX, dq).0
 }
 
-pub fn encode_frame_with_recon(pixels: &FramePixels) -> (Vec<u8>, FramePixels) {
-    let base_q_idx: u8 = 128;
+pub fn encode_frame_with_recon(
+    pixels: &FramePixels,
+    base_q_idx: u8,
+    dq: DequantValues,
+) -> (Vec<u8>, FramePixels) {
     let mut w = BitWriter::new();
 
     let sbw = pixels.width.div_ceil(64);
@@ -47,7 +52,7 @@ pub fn encode_frame_with_recon(pixels: &FramePixels) -> (Vec<u8>, FramePixels) {
     w.write_bit(true);
 
     let mut header_bytes = w.finalize();
-    let (tile_data, recon) = crate::tile::encode_tile_with_recon(pixels);
+    let (tile_data, recon) = crate::tile::encode_tile_with_recon(pixels, dq, base_q_idx);
     header_bytes.extend_from_slice(&tile_data);
     (header_bytes, recon)
 }
@@ -94,7 +99,16 @@ pub fn encode_inter_frame(
     refresh_frame_flags: u8,
     ref_slot: u8,
 ) -> Vec<u8> {
-    encode_inter_frame_with_recon(pixels, reference, refresh_frame_flags, ref_slot).0
+    let dq = crate::dequant::lookup_dequant(crate::DEFAULT_BASE_Q_IDX);
+    encode_inter_frame_with_recon(
+        pixels,
+        reference,
+        refresh_frame_flags,
+        ref_slot,
+        crate::DEFAULT_BASE_Q_IDX,
+        dq,
+    )
+    .0
 }
 
 pub fn encode_inter_frame_with_recon(
@@ -102,8 +116,9 @@ pub fn encode_inter_frame_with_recon(
     reference: &FramePixels,
     refresh_frame_flags: u8,
     ref_slot: u8,
+    base_q_idx: u8,
+    dq: DequantValues,
 ) -> (Vec<u8>, FramePixels) {
-    let base_q_idx: u8 = 128;
     let mut w = BitWriter::new();
 
     let sbw = pixels.width.div_ceil(64);
@@ -148,7 +163,7 @@ pub fn encode_inter_frame_with_recon(
     }
 
     let mut header_bytes = w.finalize();
-    let (tile_data, recon) = crate::tile::encode_inter_tile_with_recon(pixels, reference);
+    let (tile_data, recon) = crate::tile::encode_inter_tile_with_recon(pixels, reference, dq, base_q_idx);
     header_bytes.extend_from_slice(&tile_data);
     (header_bytes, recon)
 }
