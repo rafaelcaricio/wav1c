@@ -5,3 +5,17 @@ version = 4
 [[package]]
 name = "wav1c"
 version = "0.1.0"
+
+[[package]]
+name = "wav1c-cli"
+version = "0.1.0"
+dependencies = [
+ "wav1c",
+]
+
+[[package]]
+name = "wav1c-ffi"
+version = "0.1.0"
+dependencies = [
+ "wav1c",
+]

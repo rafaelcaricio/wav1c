@@ -156,38 +156,86 @@ fn main() {
         } => vec![wav1c::y4m::FramePixels::solid(*width, *height, *y, *u, *v)],
     };
 
-    let data = wav1c::encode(&frames, &cli.config);
+    let width = frames[0].width;
+    let height = frames[0].height;
+    let encoder_config = wav1c::EncoderConfig::from(&cli.config);
+    let mut encoder = wav1c::Encoder::new(width, height, encoder_config).unwrap_or_else(|e| {
+        eprintln!("Error creating encoder: {:?}", e);
+        process::exit(1);
+    });
+
+    let mut output = Vec::new();
+    wav1c::ivf::write_ivf_header(&mut output, width as u16, height as u16, frames.len() as u32)
+        .unwrap();
+
+    for frame in &frames {
+        encoder.send_frame(frame).unwrap_or_else(|e| {
+            eprintln!("Error encoding frame: {:?}", e);
+            process::exit(1);
+        });
+
+        if let Some(packet) = encoder.receive_packet() {
+            let frame_type_str = match packet.frame_type {
+                wav1c::FrameType::Key => "KEY",
+                wav1c::FrameType::Inter => "INTER",
+            };
+            eprintln!(
+                "frame {:>4}  {:>5}  {} bytes",
+                packet.frame_number,
+                frame_type_str,
+                packet.data.len()
+            );
+
+            wav1c::ivf::write_ivf_frame(&mut output, packet.frame_number, &packet.data).unwrap();
+        }
+    }
+
+    encoder.flush();
+
+    while let Some(packet) = encoder.receive_packet() {
+        let frame_type_str = match packet.frame_type {
+            wav1c::FrameType::Key => "KEY",
+            wav1c::FrameType::Inter => "INTER",
+        };
+        eprintln!(
+            "frame {:>4}  {:>5}  {} bytes",
+            packet.frame_number, frame_type_str, packet.data.len()
+        );
+        wav1c::ivf::write_ivf_frame(&mut output, packet.frame_number, &packet.data).unwrap();
+    }
 
     let mut file = File::create(&cli.output_path).unwrap_or_else(|e| {
         eprintln!("Error creating {}: {}", cli.output_path, e);
         process::exit(1);
     });
-    file.write_all(&data).unwrap_or_else(|e| {
+    file.write_all(&output).unwrap_or_else(|e| {
         eprintln!("Error writing {}: {}", cli.output_path, e);
         process::exit(1);
     });
 
-    match cli.config.target_bitrate {
-        Some(br) => {
-            eprintln!(
-                "Wrote {} bytes to {} (target={}kbps, keyint={})",
-                data.len(),
-                cli.output_path,
-                br / 1000,
-                cli.config.keyint
-            );
-        }
-        None => {
-            let dq = wav1c::dequant::lookup_dequant(cli.config.base_q_idx);
-            eprintln!(
-                "Wrote {} bytes to {} (q={}, keyint={}, dc_dq={}, ac_dq={})",
-                data.len(),
-                cli.output_path,
-                cli.config.base_q_idx,
-                cli.config.keyint,
-                dq.dc,
-                dq.ac
-            );
-        }
+    eprintln!();
+    if let Some(stats) = encoder.rate_control_stats() {
+        eprintln!(
+            "Wrote {} bytes to {} ({} frames, target={}kbps, avg_qp={}, buffer={}%, keyint={})",
+            output.len(),
+            cli.output_path,
+            frames.len(),
+            stats.target_bitrate / 1000,
+            stats.avg_qp,
+            stats.buffer_fullness_pct,
+            cli.config.keyint
+        );
+    } else {
+        let dq = wav1c::dequant::lookup_dequant(cli.config.base_q_idx);
+        eprintln!(
+            "Wrote {} bytes to {} ({} frames, q={}, keyint={}, dc_dq={}, ac_dq={})",
+            output.len(),
+            cli.output_path,
+            frames.len(),
+            cli.config.base_q_idx,
+            cli.config.keyint,
+            dq.dc,
+            dq.ac
+        );
     }
 }
