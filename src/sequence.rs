@@ -63,7 +63,7 @@ pub fn encode_sequence_header(width: u32, height: u32) -> Vec<u8> {
     w.write_bit(seq_force_screen_content_tools);
 
     let enable_superres = false;
-    let enable_cdef = false;
+    let enable_cdef = true;
     let enable_restoration = false;
     w.write_bit(enable_superres);
     w.write_bit(enable_cdef);
@@ -149,7 +149,7 @@ mod tests {
         expected.write_bit(false);
         expected.write_bits(0, 2);
         expected.write_bit(false);
-        expected.write_bit(false);
+        expected.write_bit(true);
         expected.write_bit(false);
         expected.write_bit(false);
         expected.write_bit(false);
