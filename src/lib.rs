@@ -1,5 +1,7 @@
 pub mod bitwriter;
 pub mod cdf;
+pub mod cdf_coef;
+pub mod dequant;
 pub mod frame;
 pub mod ivf;
 pub mod msac;
@@ -8,7 +10,16 @@ pub mod sequence;
 pub mod tile;
 pub mod y4m;
 
+pub const DEFAULT_BASE_Q_IDX: u8 = 128;
+
 pub fn encode_av1_ivf_multi(frames: &[y4m::FramePixels]) -> Vec<u8> {
+    encode_av1_ivf_multi_with_quality(frames, DEFAULT_BASE_Q_IDX)
+}
+
+pub fn encode_av1_ivf_multi_with_quality(
+    frames: &[y4m::FramePixels],
+    base_q_idx: u8,
+) -> Vec<u8> {
     assert!(!frames.is_empty(), "frames must not be empty");
 
     let width = frames[0].width;
@@ -24,6 +35,7 @@ pub fn encode_av1_ivf_multi(frames: &[y4m::FramePixels]) -> Vec<u8> {
     assert!((1..=4096).contains(&width), "width must be 1..=4096");
     assert!((1..=2304).contains(&height), "height must be 1..=2304");
 
+    let dq = dequant::lookup_dequant(base_q_idx);
     let gop_size = 25usize;
     let mut output = Vec::new();
     ivf::write_ivf_header(&mut output, width as u16, height as u16, frames.len() as u32).unwrap();
@@ -40,13 +52,15 @@ pub fn encode_av1_ivf_multi(frames: &[y4m::FramePixels]) -> Vec<u8> {
         );
 
         let (frame_payload, recon) = if is_keyframe {
-            frame::encode_frame_with_recon(pixels)
+            frame::encode_frame_with_recon(pixels, base_q_idx, dq)
         } else {
             frame::encode_inter_frame_with_recon(
                 pixels,
                 reference.as_ref().unwrap(),
                 0x01,
                 0,
+                base_q_idx,
+                dq,
             )
         };
 

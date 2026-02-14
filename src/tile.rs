@@ -1,4 +1,5 @@
 use crate::cdf::CdfContext;
+use crate::dequant::DequantValues;
 use crate::msac::MsacEncoder;
 use crate::y4m::FramePixels;
 use std::cmp::min;
@@ -9,9 +10,6 @@ mod dct;
 mod scan;
 
 use scan::{DEFAULT_SCAN_4X4, DEFAULT_SCAN_8X8, LO_CTX_OFFSETS_2D};
-
-const DQ_DC_Q128: u32 = 140;
-const DQ_AC_Q128: u32 = 176;
 
 const PARTITION_CTX_NONE: [u8; 5] = [0, 0x10, 0x18, 0x1c, 0x1e];
 
@@ -304,6 +302,7 @@ struct TileEncoder<'a> {
     mi_cols: u32,
     mi_rows: u32,
     pixels: &'a FramePixels,
+    dq: DequantValues,
     recon: FramePixels,
 }
 
@@ -780,18 +779,19 @@ impl TileContext {
 }
 
 impl<'a> TileEncoder<'a> {
-    fn new(pixels: &'a FramePixels) -> Self {
+    fn new(pixels: &'a FramePixels, dq: DequantValues, base_q_idx: u8) -> Self {
         let mi_cols = 2 * pixels.width.div_ceil(8);
         let mi_rows = 2 * pixels.height.div_ceil(8);
         let cw = pixels.width.div_ceil(2);
         let ch = pixels.height.div_ceil(2);
         Self {
             enc: MsacEncoder::new(),
-            cdf: CdfContext::default(),
+            cdf: CdfContext::for_qidx(base_q_idx),
             ctx: TileContext::new(mi_cols),
             mi_cols,
             mi_rows,
             pixels,
+            dq,
             recon: FramePixels {
                 width: pixels.width,
                 height: pixels.height,
@@ -825,21 +825,21 @@ impl<'a> TileEncoder<'a> {
             y_residual[i] = y_block[i] as i32 - y_pred as i32;
         }
         let y_dct = dct::forward_dct_8x8(&y_residual);
-        let y_quant = quantize_coeffs(&y_dct, 64, DQ_DC_Q128, DQ_AC_Q128);
+        let y_quant = quantize_coeffs(&y_dct, 64, self.dq.dc, self.dq.ac);
 
         let mut u_residual = [0i32; 16];
         for i in 0..16 {
             u_residual[i] = u_block[i] as i32 - u_pred as i32;
         }
         let u_dct = dct::forward_dct_4x4(&u_residual);
-        let u_quant = quantize_coeffs(&u_dct, 16, DQ_DC_Q128, DQ_AC_Q128);
+        let u_quant = quantize_coeffs(&u_dct, 16, self.dq.dc, self.dq.ac);
 
         let mut v_residual = [0i32; 16];
         for i in 0..16 {
             v_residual[i] = v_block[i] as i32 - v_pred as i32;
         }
         let v_dct = dct::forward_dct_4x4(&v_residual);
-        let v_quant = quantize_coeffs(&v_dct, 16, DQ_DC_Q128, DQ_AC_Q128);
+        let v_quant = quantize_coeffs(&v_dct, 16, self.dq.dc, self.dq.ac);
 
         let is_skip = y_quant.iter().all(|&c| c == 0)
             && u_quant.iter().all(|&c| c == 0)
@@ -923,7 +923,7 @@ impl<'a> TileEncoder<'a> {
             v_dc_zero = true;
         }
 
-        let y_deq = dequantize_coeffs(&y_quant, 64, DQ_DC_Q128, DQ_AC_Q128);
+        let y_deq = dequantize_coeffs(&y_quant, 64, self.dq.dc, self.dq.ac);
         let mut y_deq_arr = [0i32; 64];
         y_deq_arr.copy_from_slice(&y_deq);
         let y_recon_residual = dct::inverse_dct_8x8(&y_deq_arr);
@@ -939,7 +939,7 @@ impl<'a> TileEncoder<'a> {
             }
         }
 
-        let u_deq = dequantize_coeffs(&u_quant, 16, DQ_DC_Q128, DQ_AC_Q128);
+        let u_deq = dequantize_coeffs(&u_quant, 16, self.dq.dc, self.dq.ac);
         let mut u_deq_arr = [0i32; 16];
         u_deq_arr.copy_from_slice(&u_deq);
         let u_recon_residual = dct::inverse_dct_4x4(&u_deq_arr);
@@ -955,7 +955,7 @@ impl<'a> TileEncoder<'a> {
             }
         }
 
-        let v_deq = dequantize_coeffs(&v_quant, 16, DQ_DC_Q128, DQ_AC_Q128);
+        let v_deq = dequantize_coeffs(&v_quant, 16, self.dq.dc, self.dq.ac);
         let mut v_deq_arr = [0i32; 16];
         v_deq_arr.copy_from_slice(&v_deq);
         let v_recon_residual = dct::inverse_dct_4x4(&v_deq_arr);
@@ -1103,11 +1103,12 @@ impl<'a> TileEncoder<'a> {
 }
 
 pub fn encode_tile(pixels: &FramePixels) -> Vec<u8> {
-    encode_tile_with_recon(pixels).0
+    let dq = crate::dequant::lookup_dequant(crate::DEFAULT_BASE_Q_IDX);
+    encode_tile_with_recon(pixels, dq, crate::DEFAULT_BASE_Q_IDX).0
 }
 
-pub fn encode_tile_with_recon(pixels: &FramePixels) -> (Vec<u8>, FramePixels) {
-    let mut tile = TileEncoder::new(pixels);
+pub fn encode_tile_with_recon(pixels: &FramePixels, dq: DequantValues, base_q_idx: u8) -> (Vec<u8>, FramePixels) {
+    let mut tile = TileEncoder::new(pixels, dq, base_q_idx);
 
     let sb_cols = tile.mi_cols.div_ceil(16);
     let sb_rows = tile.mi_rows.div_ceil(16);
@@ -1132,11 +1133,12 @@ struct InterTileEncoder<'a> {
     mi_rows: u32,
     pixels: &'a FramePixels,
     reference: &'a FramePixels,
+    dq: DequantValues,
     recon: FramePixels,
 }
 
 impl<'a> InterTileEncoder<'a> {
-    fn new(pixels: &'a FramePixels, reference: &'a FramePixels) -> Self {
+    fn new(pixels: &'a FramePixels, reference: &'a FramePixels, dq: DequantValues, base_q_idx: u8) -> Self {
         let mi_cols = 2 * pixels.width.div_ceil(8);
         let mi_rows = 2 * pixels.height.div_ceil(8);
         let cw = pixels.width.div_ceil(2);
@@ -1145,12 +1147,13 @@ impl<'a> InterTileEncoder<'a> {
         enc.allow_update_cdf = false;
         Self {
             enc,
-            cdf: CdfContext::default(),
+            cdf: CdfContext::for_qidx(base_q_idx),
             ctx: TileContext::new(mi_cols),
             mi_cols,
             mi_rows,
             pixels,
             reference,
+            dq,
             recon: FramePixels {
                 width: pixels.width,
                 height: pixels.height,
@@ -1184,21 +1187,21 @@ impl<'a> InterTileEncoder<'a> {
             y_residual[i] = y_src[i] as i32 - y_ref_block[i] as i32;
         }
         let y_dct = dct::forward_dct_8x8(&y_residual);
-        let y_quant = quantize_coeffs(&y_dct, 64, DQ_DC_Q128, DQ_AC_Q128);
+        let y_quant = quantize_coeffs(&y_dct, 64, self.dq.dc, self.dq.ac);
 
         let mut u_residual = [0i32; 16];
         for i in 0..16 {
             u_residual[i] = u_src[i] as i32 - u_ref_block[i] as i32;
         }
         let u_dct = dct::forward_dct_4x4(&u_residual);
-        let u_quant = quantize_coeffs(&u_dct, 16, DQ_DC_Q128, DQ_AC_Q128);
+        let u_quant = quantize_coeffs(&u_dct, 16, self.dq.dc, self.dq.ac);
 
         let mut v_residual = [0i32; 16];
         for i in 0..16 {
             v_residual[i] = v_src[i] as i32 - v_ref_block[i] as i32;
         }
         let v_dct = dct::forward_dct_4x4(&v_residual);
-        let v_quant = quantize_coeffs(&v_dct, 16, DQ_DC_Q128, DQ_AC_Q128);
+        let v_quant = quantize_coeffs(&v_dct, 16, self.dq.dc, self.dq.ac);
 
         let is_skip = y_quant.iter().all(|&c| c == 0)
             && u_quant.iter().all(|&c| c == 0)
@@ -1293,7 +1296,7 @@ impl<'a> InterTileEncoder<'a> {
             v_dc_zero = true;
         }
 
-        let y_deq = dequantize_coeffs(&y_quant, 64, DQ_DC_Q128, DQ_AC_Q128);
+        let y_deq = dequantize_coeffs(&y_quant, 64, self.dq.dc, self.dq.ac);
         let mut y_deq_arr = [0i32; 64];
         y_deq_arr.copy_from_slice(&y_deq);
         let y_recon_residual = dct::inverse_dct_8x8(&y_deq_arr);
@@ -1309,7 +1312,7 @@ impl<'a> InterTileEncoder<'a> {
             }
         }
 
-        let u_deq = dequantize_coeffs(&u_quant, 16, DQ_DC_Q128, DQ_AC_Q128);
+        let u_deq = dequantize_coeffs(&u_quant, 16, self.dq.dc, self.dq.ac);
         let mut u_deq_arr = [0i32; 16];
         u_deq_arr.copy_from_slice(&u_deq);
         let u_recon_residual = dct::inverse_dct_4x4(&u_deq_arr);
@@ -1325,7 +1328,7 @@ impl<'a> InterTileEncoder<'a> {
             }
         }
 
-        let v_deq = dequantize_coeffs(&v_quant, 16, DQ_DC_Q128, DQ_AC_Q128);
+        let v_deq = dequantize_coeffs(&v_quant, 16, self.dq.dc, self.dq.ac);
         let mut v_deq_arr = [0i32; 16];
         v_deq_arr.copy_from_slice(&v_deq);
         let v_recon_residual = dct::inverse_dct_4x4(&v_deq_arr);
@@ -1475,16 +1478,19 @@ impl<'a> InterTileEncoder<'a> {
 }
 
 pub fn encode_inter_tile(pixels: &FramePixels, reference: &FramePixels) -> Vec<u8> {
-    encode_inter_tile_with_recon(pixels, reference).0
+    let dq = crate::dequant::lookup_dequant(crate::DEFAULT_BASE_Q_IDX);
+    encode_inter_tile_with_recon(pixels, reference, dq, crate::DEFAULT_BASE_Q_IDX).0
 }
 
 pub fn encode_inter_tile_with_recon(
     pixels: &FramePixels,
     reference: &FramePixels,
+    dq: DequantValues,
+    base_q_idx: u8,
 ) -> (Vec<u8>, FramePixels) {
     assert_eq!(pixels.width, reference.width, "reference frame width mismatch");
     assert_eq!(pixels.height, reference.height, "reference frame height mismatch");
-    let mut tile = InterTileEncoder::new(pixels, reference);
+    let mut tile = InterTileEncoder::new(pixels, reference, dq, base_q_idx);
 
     let sb_cols = tile.mi_cols.div_ceil(16);
     let sb_rows = tile.mi_rows.div_ceil(16);
@@ -1859,8 +1865,9 @@ mod tests {
     #[test]
     fn quantize_dequantize_roundtrip() {
         let coeffs = vec![280i32, -176, 88, 0, -352, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let quant = quantize_coeffs(&coeffs, 16, DQ_DC_Q128, DQ_AC_Q128);
-        let deq = dequantize_coeffs(&quant, 16, DQ_DC_Q128, DQ_AC_Q128);
+        let dq = crate::dequant::lookup_dequant(128);
+        let quant = quantize_coeffs(&coeffs, 16, dq.dc, dq.ac);
+        let deq = dequantize_coeffs(&quant, 16, dq.dc, dq.ac);
         assert_eq!(deq[0], 280);
         assert_eq!(deq[1], -176);
     }

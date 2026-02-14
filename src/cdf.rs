@@ -1162,23 +1162,24 @@ pub struct CdfContext {
     pub txtp_inter: [u16; 4],
 }
 
-impl Default for CdfContext {
-    fn default() -> Self {
+impl CdfContext {
+    pub fn for_qidx(base_q_idx: u8) -> Self {
+        let coef = crate::cdf_coef::coef_cdfs_for_qidx(base_q_idx);
         Self {
             kf_y_mode: DEFAULT_KF_Y_MODE_CDF,
             uv_mode: DEFAULT_UV_MODE_CDF,
             partition: DEFAULT_PARTITION_CDF,
             skip: DEFAULT_SKIP_CDF,
-            txb_skip: DEFAULT_TXB_SKIP_CDF,
-            eob_bin_16: DEFAULT_EOB_BIN_16_CDF,
-            eob_bin_64: DEFAULT_EOB_BIN_64_CDF,
+            txb_skip: *coef.txb_skip,
+            eob_bin_16: *coef.eob_bin_16,
+            eob_bin_64: *coef.eob_bin_64,
             eob_bin_256: DEFAULT_EOB_BIN_256_CDF,
             eob_bin_1024: DEFAULT_EOB_BIN_1024_CDF,
-            eob_base_tok: DEFAULT_EOB_BASE_TOK_CDF,
-            br_tok: DEFAULT_BR_TOK_CDF,
-            eob_hi_bit: DEFAULT_EOB_HI_BIT_CDF,
-            base_tok: DEFAULT_BASE_TOK_CDF,
-            dc_sign: DEFAULT_DC_SIGN_CDF,
+            eob_base_tok: *coef.eob_base_tok,
+            br_tok: *coef.br_tok,
+            eob_hi_bit: *coef.eob_hi_bit,
+            base_tok: *coef.base_tok,
+            dc_sign: *coef.dc_sign,
             is_inter: DEFAULT_IS_INTER_CDF,
             newmv: DEFAULT_NEWMV_CDF,
             zeromv: DEFAULT_ZEROMV_CDF,
@@ -1186,5 +1187,11 @@ impl Default for CdfContext {
             txtp_intra: [26214, 19661, 13107, 6554, 0, 0],
             txtp_inter: [28601, 0, 0, 0],
         }
+    }
+}
+
+impl Default for CdfContext {
+    fn default() -> Self {
+        Self::for_qidx(crate::DEFAULT_BASE_Q_IDX)
     }
 }
