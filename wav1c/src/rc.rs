@@ -1,3 +1,4 @@
+#[derive(Debug)]
 pub struct RateControl {
     target_bitrate: u64,
     buffer_size: f64,
