@@ -1,5 +1,9 @@
 # wav1c - Wondrous AV1 Encoder
 
+[![crates.io](https://img.shields.io/crates/v/wav1c.svg)](https://crates.io/crates/wav1c)
+[![license](https://img.shields.io/crates/l/wav1c.svg)](LICENSE)
+[![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](https://github.com/rust-secure-code/safety-dance/)
+
 An AV1 video encoder written from scratch in safe Rust with zero dependencies. Produces IVF files decodable by [dav1d](https://code.videolan.org/videolan/dav1d).
 
 ## Features
