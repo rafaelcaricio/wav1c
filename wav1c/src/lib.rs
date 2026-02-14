@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 pub mod bitwriter;
 pub mod cdf;
 pub mod cdf_coef;
