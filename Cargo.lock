@@ -108,25 +108,25 @@ dependencies = [
 
 [[package]]
 name = "wav1c"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "wav1c-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "wav1c",
 ]
 
 [[package]]
 name = "wav1c-ffi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "wav1c",
 ]
 
 [[package]]
 name = "wav1c-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "wasm-bindgen",
  "wav1c",

@@ -1,6 +1,6 @@
 [package]
 name = "wav1c"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Wondrous AV1 encoder written in safe Rust."
 license = "MPL-2.0"
