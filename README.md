@@ -1,4 +1,4 @@
-# wav1c - Wondrous AV1 Coder
+# wav1c - Wondrous AV1 Encoder
 
 An AV1 video encoder written from scratch in safe Rust with zero dependencies. Produces IVF files decodable by [dav1d](https://code.videolan.org/videolan/dav1d).
 
