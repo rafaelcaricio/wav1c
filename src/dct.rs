@@ -126,6 +126,26 @@ fn fwd_dct8_1d(data: &mut [i32], offset: usize, stride: usize) {
     data[offset + 7 * stride] = o7;
 }
 
+fn transpose_4x4(buf: &mut [i32; 16]) {
+    for r in 0..4 {
+        for c in (r + 1)..4 {
+            let a = r * 4 + c;
+            let b = c * 4 + r;
+            buf.swap(a, b);
+        }
+    }
+}
+
+fn transpose_8x8(buf: &mut [i32; 64]) {
+    for r in 0..8 {
+        for c in (r + 1)..8 {
+            let a = r * 8 + c;
+            let b = c * 8 + r;
+            buf.swap(a, b);
+        }
+    }
+}
+
 pub fn forward_dct_4x4(residual: &[i32; 16]) -> [i32; 16] {
     let mut buf = *residual;
 
@@ -141,6 +161,7 @@ pub fn forward_dct_4x4(residual: &[i32; 16]) -> [i32; 16] {
         fwd_dct4_1d(&mut buf, col, 4);
     }
 
+    transpose_4x4(&mut buf);
     buf
 }
 
@@ -163,11 +184,13 @@ pub fn forward_dct_8x8(residual: &[i32; 64]) -> [i32; 64] {
         fwd_dct8_1d(&mut buf, col, 8);
     }
 
+    transpose_8x8(&mut buf);
     buf
 }
 
 pub fn inverse_dct_4x4(coeffs: &[i32; 16]) -> [i32; 16] {
     let mut buf = *coeffs;
+    transpose_4x4(&mut buf);
 
     for row in 0..4 {
         inv_dct4_1d(&mut buf, row * 4, 1);
@@ -186,6 +209,7 @@ pub fn inverse_dct_4x4(coeffs: &[i32; 16]) -> [i32; 16] {
 
 pub fn inverse_dct_8x8(coeffs: &[i32; 64]) -> [i32; 64] {
     let mut buf = *coeffs;
+    transpose_8x8(&mut buf);
 
     for row in 0..8 {
         inv_dct8_1d(&mut buf, row * 8, 1);
@@ -440,6 +464,7 @@ mod tests {
         let coeffs = [100, 20, -10, 5, 30, -15, 8, -3, -5, 12, 0, -7, 18, -9, 4, -2];
         let result = inverse_dct_4x4(&coeffs);
         let mut buf = coeffs;
+        transpose_4x4(&mut buf);
         for row in 0..4 {
             inv_dct4_1d(&mut buf, row * 4, 1);
         }
@@ -459,6 +484,7 @@ mod tests {
         }
         let result = inverse_dct_8x8(&coeffs);
         let mut buf = coeffs;
+        transpose_8x8(&mut buf);
         for row in 0..8 {
             inv_dct8_1d(&mut buf, row * 8, 1);
         }
