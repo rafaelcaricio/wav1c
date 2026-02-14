@@ -11,15 +11,41 @@ pub mod tile;
 pub mod y4m;
 
 pub const DEFAULT_BASE_Q_IDX: u8 = 128;
+pub const DEFAULT_KEYINT: usize = 25;
+
+#[derive(Clone)]
+pub struct EncodeConfig {
+    pub base_q_idx: u8,
+    pub keyint: usize,
+}
+
+impl Default for EncodeConfig {
+    fn default() -> Self {
+        Self {
+            base_q_idx: DEFAULT_BASE_Q_IDX,
+            keyint: DEFAULT_KEYINT,
+        }
+    }
+}
 
 pub fn encode_av1_ivf_multi(frames: &[y4m::FramePixels]) -> Vec<u8> {
-    encode_av1_ivf_multi_with_quality(frames, DEFAULT_BASE_Q_IDX)
+    encode(frames, &EncodeConfig::default())
 }
 
 pub fn encode_av1_ivf_multi_with_quality(
     frames: &[y4m::FramePixels],
     base_q_idx: u8,
 ) -> Vec<u8> {
+    encode(
+        frames,
+        &EncodeConfig {
+            base_q_idx,
+            ..Default::default()
+        },
+    )
+}
+
+pub fn encode(frames: &[y4m::FramePixels], config: &EncodeConfig) -> Vec<u8> {
     assert!(!frames.is_empty(), "frames must not be empty");
 
     let width = frames[0].width;
@@ -35,8 +61,8 @@ pub fn encode_av1_ivf_multi_with_quality(
     assert!((1..=4096).contains(&width), "width must be 1..=4096");
     assert!((1..=2304).contains(&height), "height must be 1..=2304");
 
-    let dq = dequant::lookup_dequant(base_q_idx);
-    let gop_size = 25usize;
+    let dq = dequant::lookup_dequant(config.base_q_idx);
+    let gop_size = config.keyint;
     let mut output = Vec::new();
     ivf::write_ivf_header(&mut output, width as u16, height as u16, frames.len() as u32).unwrap();
 
@@ -52,14 +78,14 @@ pub fn encode_av1_ivf_multi_with_quality(
         );
 
         let (frame_payload, recon) = if is_keyframe {
-            frame::encode_frame_with_recon(pixels, base_q_idx, dq)
+            frame::encode_frame_with_recon(pixels, config.base_q_idx, dq)
         } else {
             frame::encode_inter_frame_with_recon(
                 pixels,
                 reference.as_ref().unwrap(),
                 0x01,
                 0,
-                base_q_idx,
+                config.base_q_idx,
                 dq,
             )
         };
