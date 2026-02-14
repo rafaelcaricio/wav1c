@@ -47,6 +47,7 @@ pub fn encode_frame_with_recon(
     w.write_bit(false);
 
     write_loopfilter_params(&mut w, base_q_idx);
+    write_cdef_params(&mut w, base_q_idx);
 
     w.write_bit(false);
     w.write_bit(true);
@@ -83,6 +84,25 @@ fn write_quant_params(w: &mut BitWriter, base_q_idx: u8) {
     w.write_bit(false);
     w.write_bit(false);
     w.write_bit(false);
+}
+
+fn cdef_strength_for_qidx(base_q_idx: u8) -> (u8, u8, u8) {
+    if base_q_idx < 20 {
+        return (0, 0, 0);
+    }
+    let damping_minus_3 = ((base_q_idx as u32) / 64).min(3) as u8;
+    let pri = ((base_q_idx as u32) / 16).min(15) as u8;
+    let sec = if base_q_idx < 80 { 0u8 } else if base_q_idx < 180 { 1 } else { 2 };
+    let strength = (pri << 2) | sec;
+    (damping_minus_3, strength, strength)
+}
+
+fn write_cdef_params(w: &mut BitWriter, base_q_idx: u8) {
+    let (damping_minus_3, y_strength, uv_strength) = cdef_strength_for_qidx(base_q_idx);
+    w.write_bits(damping_minus_3 as u64, 2);
+    w.write_bits(0, 2);
+    w.write_bits(y_strength as u64, 6);
+    w.write_bits(uv_strength as u64, 6);
 }
 
 fn loop_filter_level_for_qidx(base_q_idx: u8) -> u8 {
@@ -162,6 +182,7 @@ pub fn encode_inter_frame_with_recon(
     w.write_bit(false);
 
     write_loopfilter_params(&mut w, base_q_idx);
+    write_cdef_params(&mut w, base_q_idx);
 
     w.write_bit(false);
     w.write_bit(false);
@@ -180,6 +201,29 @@ pub fn encode_inter_frame_with_recon(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cdef_strength_mapping() {
+        let (d, y, uv) = cdef_strength_for_qidx(0);
+        assert_eq!((d, y, uv), (0, 0, 0));
+        let (d, y, uv) = cdef_strength_for_qidx(10);
+        assert_eq!((d, y, uv), (0, 0, 0));
+        let (d, y, uv) = cdef_strength_for_qidx(128);
+        assert_eq!(d, 2);
+        assert_eq!(y >> 2, 8);
+        assert_eq!(y & 3, 1);
+        assert_eq!(y, uv);
+        let (d, y, _) = cdef_strength_for_qidx(200);
+        assert_eq!(d, 3);
+        assert_eq!(y >> 2, 12);
+        assert_eq!(y & 3, 2);
+        for q in 0..=255u8 {
+            let (d, y, uv) = cdef_strength_for_qidx(q);
+            assert!(d <= 3);
+            assert!(y <= 63);
+            assert!(uv <= 63);
+        }
+    }
 
     #[test]
     fn loop_filter_level_mapping() {
@@ -240,6 +284,11 @@ mod tests {
         expected.write_bits(0, 3);
         expected.write_bit(true);
         expected.write_bit(false);
+
+        expected.write_bits(2, 2);
+        expected.write_bits(0, 2);
+        expected.write_bits(33, 6);
+        expected.write_bits(33, 6);
 
         expected.write_bit(false);
         expected.write_bit(true);
@@ -311,6 +360,11 @@ mod tests {
         expected.write_bit(true);
         expected.write_bit(false);
 
+        expected.write_bits(2, 2);
+        expected.write_bits(0, 2);
+        expected.write_bits(33, 6);
+        expected.write_bits(33, 6);
+
         expected.write_bit(false);
         expected.write_bit(true);
 
@@ -367,6 +421,11 @@ mod tests {
         expected.write_bits(0, 3);
         expected.write_bit(true);
         expected.write_bit(false);
+
+        expected.write_bits(2, 2);
+        expected.write_bits(0, 2);
+        expected.write_bits(33, 6);
+        expected.write_bits(33, 6);
 
         expected.write_bit(false);
         expected.write_bit(false);
