@@ -21,6 +21,23 @@ enum InputMode {
     },
 }
 
+fn parse_bitrate(args: &[String]) -> Option<u64> {
+    for i in 0..args.len().saturating_sub(1) {
+        if args[i] == "--bitrate" {
+            let s = &args[i + 1];
+            let (num, mult) = if let Some(n) = s.strip_suffix('k').or_else(|| s.strip_suffix('K')) {
+                (n, 1_000u64)
+            } else if let Some(n) = s.strip_suffix('m').or_else(|| s.strip_suffix('M')) {
+                (n, 1_000_000u64)
+            } else {
+                (s.as_str(), 1u64)
+            };
+            return num.parse::<u64>().ok().map(|v| v * mult);
+        }
+    }
+    None
+}
+
 fn parse_option<T: std::str::FromStr>(args: &[String], flag: &str) -> Option<T> {
     for i in 0..args.len().saturating_sub(1) {
         if args[i] == flag {
@@ -31,7 +48,7 @@ fn parse_option<T: std::str::FromStr>(args: &[String], flag: &str) -> Option<T> 
 }
 
 fn strip_options(args: &[String]) -> Vec<String> {
-    let option_flags = ["-q", "--keyint"];
+    let option_flags = ["-q", "--keyint", "--bitrate"];
     let mut result = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -50,6 +67,7 @@ fn parse_cli() -> CliArgs {
 
     let quality: u8 = parse_option(&raw_args, "-q").unwrap_or(wav1c::DEFAULT_BASE_Q_IDX);
     let keyint: usize = parse_option(&raw_args, "--keyint").unwrap_or(wav1c::DEFAULT_KEYINT);
+    let bitrate: Option<u64> = parse_bitrate(&raw_args);
 
     let args = strip_options(&raw_args);
 
@@ -61,6 +79,8 @@ fn parse_cli() -> CliArgs {
     let config = wav1c::EncodeConfig {
         base_q_idx: quality,
         keyint,
+        target_bitrate: bitrate,
+        ..Default::default()
     };
 
     if args[1].ends_with(".y4m") {
@@ -114,6 +134,7 @@ fn print_usage() {
     eprintln!("Options:");
     eprintln!("  -q <0-255>      Quantizer index (0=best, 255=smallest, default=128)");
     eprintln!("  --keyint <N>    Keyframe interval in frames (default=25)");
+    eprintln!("  --bitrate <N>   Target bitrate (e.g., 500k, 2M). Overrides -q");
 }
 
 fn main() {
@@ -146,14 +167,27 @@ fn main() {
         process::exit(1);
     });
 
-    let dq = wav1c::dequant::lookup_dequant(cli.config.base_q_idx);
-    eprintln!(
-        "Wrote {} bytes to {} (q={}, keyint={}, dc_dq={}, ac_dq={})",
-        data.len(),
-        cli.output_path,
-        cli.config.base_q_idx,
-        cli.config.keyint,
-        dq.dc,
-        dq.ac
-    );
+    match cli.config.target_bitrate {
+        Some(br) => {
+            eprintln!(
+                "Wrote {} bytes to {} (target={}kbps, keyint={})",
+                data.len(),
+                cli.output_path,
+                br / 1000,
+                cli.config.keyint
+            );
+        }
+        None => {
+            let dq = wav1c::dequant::lookup_dequant(cli.config.base_q_idx);
+            eprintln!(
+                "Wrote {} bytes to {} (q={}, keyint={}, dc_dq={}, ac_dq={})",
+                data.len(),
+                cli.output_path,
+                cli.config.base_q_idx,
+                cli.config.keyint,
+                dq.dc,
+                dq.ac
+            );
+        }
+    }
 }
