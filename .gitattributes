@@ -1,0 +1,3 @@
+*.sh linguist-excluded
+wav1c/examples/** linguist-excluded
+wav1c-ffi/examples/** linguist-excluded
