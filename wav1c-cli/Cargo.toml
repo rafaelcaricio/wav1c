@@ -1,12 +1,13 @@
 [package]
 name = "wav1c-cli"
-version = "0.1.1"
+version.workspace = true
 edition = "2024"
 description = "Command-line AV1 encoder powered by wav1c."
-license = "MPL-2.0"
-repository = "https://github.com/rafaelcaricio/wav1c"
+license.workspace = true
+repository.workspace = true
 authors.workspace = true
 keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "wav1c"

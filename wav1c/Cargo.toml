@@ -1,12 +1,13 @@
 [package]
 name = "wav1c"
-version = "0.1.1"
+version.workspace = true
 edition = "2024"
 description = "Wondrous AV1 encoder written in safe Rust."
-license = "MPL-2.0"
-repository = "https://github.com/rafaelcaricio/wav1c"
+license.workspace = true
+repository.workspace = true
 authors.workspace = true
 keywords.workspace = true
+categories.workspace = true
 readme = "../README.md"
 
 [dependencies]
