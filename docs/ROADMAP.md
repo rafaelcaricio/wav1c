@@ -59,9 +59,12 @@
 - Per-pixel DC prediction with reconstructed border tracking
 - Validated with real images up to 640x480 (ffmpeg testsrc)
 
-## Phase 9: Rate Control & Quality [NEXT]
+## Phase 9: Rate Control & Quality [IN PROGRESS]
 
-- Adaptive quantization
-- Loop filter parameters
-- CDEF (Constrained Directional Enhancement Filter)
+- Configurable quantizer index (base_q_idx 0-255) with -q CLI flag [DONE]
+- Per-qcat default coefficient CDF selection (4 qcat table sets) [DONE]
+- Dequantization lookup table from dav1d (8-bit, 256 entries) [DONE]
+- Adaptive loop filter levels based on QP [DONE]
+- CDEF with adaptive strength based on QP [DONE]
+- Adaptive quantization (per-block delta_q)
 - Rate control for target bitrate
