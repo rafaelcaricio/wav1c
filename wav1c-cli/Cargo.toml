@@ -14,4 +14,4 @@ name = "wav1c"
 path = "src/main.rs"
 
 [dependencies]
-wav1c = { path = "../wav1c", version = "0.1.2" }
+wav1c = { path = "../wav1c", version = "0.2.0" }
