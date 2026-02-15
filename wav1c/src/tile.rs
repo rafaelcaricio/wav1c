@@ -516,7 +516,6 @@ fn select_best_intra_mode(
             best_delta = 0;
         }
     }
-
     if have_above && have_left {
         let smooth = predict_smooth(above, left, w, h);
         let cost = compute_rd_cost(source, &smooth, dc_dq, ac_dq, dct::TxType::DctDct);
@@ -545,26 +544,11 @@ fn select_best_intra_mode(
         let paeth = predict_paeth(above, left, top_left, w, h);
         let cost = compute_rd_cost(source, &paeth, dc_dq, ac_dq, dct::TxType::DctDct);
         if cost < best_cost {
-            best_cost = cost;
             best_mode = 12;
             best_delta = 0;
         }
-
-        for mode in 1..=8u8 {
-            for delta in -3..=3i8 {
-                if delta == 0 && (mode == 1 || mode == 2) {
-                    continue;
-                }
-                let pred = generate_prediction(mode, delta, above, left, top_left, true, true, w, h);
-                let cost = compute_rd_cost(source, &pred, dc_dq, ac_dq, dct::TxType::DctDct);
-                if cost < best_cost {
-                    best_cost = cost;
-                    best_mode = mode;
-                    best_delta = delta;
-                }
-            }
-        }
     }
+
 
     (best_mode, best_delta)
 }
@@ -1607,7 +1591,7 @@ impl<'a> TileEncoder<'a> {
                 let idx = px_x as usize + i;
                 if have_above && idx < self.ctx.above_recon_y.len() {
                     self.ctx.above_recon_y[idx]
-                } else if have_above && i < 8 {
+                } else if have_above {
                     self.ctx.above_recon_y[(px_x as usize + 7).min(self.ctx.above_recon_y.len() - 1)]
                 } else {
                     128
@@ -1621,7 +1605,7 @@ impl<'a> TileEncoder<'a> {
                 let idx = left_local_py + i;
                 if have_left && idx < self.ctx.left_recon_y.len() {
                     self.ctx.left_recon_y[idx]
-                } else if have_left && i < 8 {
+                } else if have_left {
                     self.ctx.left_recon_y[(left_local_py + 7).min(self.ctx.left_recon_y.len() - 1)]
                 } else {
                     128
@@ -1630,13 +1614,7 @@ impl<'a> TileEncoder<'a> {
             .collect();
 
         let top_left_y = if have_above && have_left {
-            if left_local_py > 0 {
-                self.ctx.left_recon_y[left_local_py - 1]
-            } else if (px_x as usize) > 0 {
-                self.ctx.above_recon_y[px_x as usize - 1]
-            } else {
-                128
-            }
+            self.recon.y[((px_y - 1) * w + (px_x - 1)) as usize]
         } else {
             128
         };
@@ -1686,6 +1664,7 @@ impl<'a> TileEncoder<'a> {
             && v_quant.iter().all(|&c| c == 0);
 
         let skip_ctx = self.ctx.skip_ctx(bx, by);
+
         self.enc.encode_bool(is_skip, &mut self.cdf.skip[skip_ctx]);
 
         let (above_mode_ctx, left_mode_ctx) = self.ctx.mode_ctx(bx, by);
@@ -1924,7 +1903,7 @@ impl<'a> TileEncoder<'a> {
                 let idx = px_x as usize + i;
                 if have_above && idx < self.ctx.above_recon_y.len() {
                     self.ctx.above_recon_y[idx]
-                } else if have_above && i < 16 {
+                } else if have_above {
                     self.ctx.above_recon_y
                         [(px_x as usize + 15).min(self.ctx.above_recon_y.len() - 1)]
                 } else {
@@ -1939,7 +1918,7 @@ impl<'a> TileEncoder<'a> {
                 let idx = left_local_py + i;
                 if have_left && idx < self.ctx.left_recon_y.len() {
                     self.ctx.left_recon_y[idx]
-                } else if have_left && i < 16 {
+                } else if have_left {
                     self.ctx.left_recon_y
                         [(left_local_py + 15).min(self.ctx.left_recon_y.len() - 1)]
                 } else {
@@ -1949,13 +1928,7 @@ impl<'a> TileEncoder<'a> {
             .collect();
 
         let top_left_y = if have_above && have_left {
-            if left_local_py > 0 {
-                self.ctx.left_recon_y[left_local_py - 1]
-            } else if (px_x as usize) > 0 {
-                self.ctx.above_recon_y[px_x as usize - 1]
-            } else {
-                128
-            }
+            self.recon.y[((px_y - 1) * w + (px_x - 1)) as usize]
         } else {
             128
         };
@@ -2019,6 +1992,7 @@ impl<'a> TileEncoder<'a> {
             && v_quant.iter().all(|&c| c == 0);
 
         let skip_ctx = self.ctx.skip_ctx(bx, by);
+
         self.enc.encode_bool(is_skip, &mut self.cdf.skip[skip_ctx]);
 
         let (above_mode_ctx, left_mode_ctx) = self.ctx.mode_ctx(bx, by);
@@ -2328,6 +2302,7 @@ impl<'a> TileEncoder<'a> {
         let v_pred = self.ctx.dc_prediction(bx, by, bl, 2);
 
         let skip_ctx = self.ctx.skip_ctx(bx, by);
+
         self.enc.encode_bool(true, &mut self.cdf.skip[skip_ctx]);
 
         let (above_mode_ctx, left_mode_ctx) = self.ctx.mode_ctx(bx, by);
