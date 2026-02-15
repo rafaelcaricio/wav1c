@@ -4,7 +4,7 @@
 [![license](https://img.shields.io/crates/l/wav1c.svg)](LICENSE)
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](https://github.com/rust-secure-code/safety-dance/)
 
-An AV1 video encoder written from scratch in safe Rust with zero dependencies. Produces IVF files decodable by [dav1d](https://code.videolan.org/videolan/dav1d).
+A spec-compliant AV1 video encoder written from scratch in safe Rust with zero dependencies. Usable as a Rust library, C shared library, WebAssembly module, or as an FFmpeg encoder plugin.
 
 ## Features
 
