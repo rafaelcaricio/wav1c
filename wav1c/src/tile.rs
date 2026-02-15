@@ -223,10 +223,37 @@ fn generate_prediction(
     }
 }
 
+#[allow(dead_code)]
 fn compute_sad(source: &[u8], prediction: &[u8]) -> u32 {
     source.iter().zip(prediction.iter())
         .map(|(&s, &p)| (s as i32 - p as i32).unsigned_abs())
         .sum()
+}
+
+fn compute_rd_cost(source: &[u8], prediction: &[u8], dc_dq: u32, ac_dq: u32) -> u64 {
+    let mut residual = [0i32; 64];
+    for i in 0..64 {
+        residual[i] = source[i] as i32 - prediction[i] as i32;
+    }
+
+    let dct_coeffs = dct::forward_dct_8x8(&residual);
+    let quant = quantize_coeffs(&dct_coeffs, 64, dc_dq, ac_dq);
+    let deq = dequantize_coeffs(&quant, 64, dc_dq, ac_dq);
+    let mut deq_arr = [0i32; 64];
+    deq_arr.copy_from_slice(&deq);
+    let recon_residual = dct::inverse_dct_8x8(&deq_arr);
+
+    let mut sse: u64 = 0;
+    for i in 0..64 {
+        let recon = (prediction[i] as i32 + recon_residual[i]).clamp(0, 255);
+        let diff = source[i] as i32 - recon;
+        sse += (diff * diff) as u64;
+    }
+
+    let nz_count: u64 = quant.iter().filter(|&&c| c != 0).count() as u64;
+    let lambda = (ac_dq as u64 * ac_dq as u64) >> 2;
+
+    sse + lambda * nz_count
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -239,54 +266,56 @@ fn select_best_intra_mode(
     have_left: bool,
     w: usize,
     h: usize,
+    dc_dq: u32,
+    ac_dq: u32,
 ) -> u8 {
     let dc = predict_dc(above, left, have_above, have_left, w, h);
     let mut best_mode = 0u8;
-    let mut best_sad = compute_sad(source, &dc);
+    let mut best_cost = compute_rd_cost(source, &dc, dc_dq, ac_dq);
 
     if have_above {
         let v = predict_v(above, w, h);
-        let sad = compute_sad(source, &v);
-        if sad < best_sad {
-            best_sad = sad;
+        let cost = compute_rd_cost(source, &v, dc_dq, ac_dq);
+        if cost < best_cost {
+            best_cost = cost;
             best_mode = 1;
         }
     }
 
     if have_left {
         let hp = predict_h(left, w, h);
-        let sad = compute_sad(source, &hp);
-        if sad < best_sad {
-            best_sad = sad;
+        let cost = compute_rd_cost(source, &hp, dc_dq, ac_dq);
+        if cost < best_cost {
+            best_cost = cost;
             best_mode = 2;
         }
     }
 
     if have_above && have_left {
         let smooth = predict_smooth(above, left, w, h);
-        let sad = compute_sad(source, &smooth);
-        if sad < best_sad {
-            best_sad = sad;
+        let cost = compute_rd_cost(source, &smooth, dc_dq, ac_dq);
+        if cost < best_cost {
+            best_cost = cost;
             best_mode = 9;
         }
 
         let sv = predict_smooth_v(above, left, w, h);
-        let sad = compute_sad(source, &sv);
-        if sad < best_sad {
-            best_sad = sad;
+        let cost = compute_rd_cost(source, &sv, dc_dq, ac_dq);
+        if cost < best_cost {
+            best_cost = cost;
             best_mode = 10;
         }
 
         let sh = predict_smooth_h(above, left, w, h);
-        let sad = compute_sad(source, &sh);
-        if sad < best_sad {
-            best_sad = sad;
+        let cost = compute_rd_cost(source, &sh, dc_dq, ac_dq);
+        if cost < best_cost {
+            best_cost = cost;
             best_mode = 11;
         }
 
         let paeth = predict_paeth(above, left, top_left, w, h);
-        let sad = compute_sad(source, &paeth);
-        if sad < best_sad {
+        let cost = compute_rd_cost(source, &paeth, dc_dq, ac_dq);
+        if cost < best_cost {
             best_mode = 12;
         }
     }
@@ -1124,6 +1153,7 @@ impl<'a> TileEncoder<'a> {
         let y_mode = select_best_intra_mode(
             &y_block, &above_y, &left_y, top_left_y,
             have_above, have_left, 8, 8,
+            self.dq.dc, self.dq.ac,
         );
         let y_pred_block = generate_prediction(
             y_mode, &above_y, &left_y, top_left_y,
@@ -2626,7 +2656,8 @@ mod tests {
         let above = [128u8; 8];
         let left = [128u8; 8];
         let block = [128u8; 64];
-        let mode = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8);
+        let dq = crate::dequant::lookup_dequant(128);
+        let mode = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
         assert_eq!(mode, 0);
     }
 
@@ -2640,7 +2671,8 @@ mod tests {
                 block[r * 8 + c] = above[c];
             }
         }
-        let mode = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8);
+        let dq = crate::dequant::lookup_dequant(128);
+        let mode = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
         assert_eq!(mode, 1);
     }
 
@@ -2654,7 +2686,8 @@ mod tests {
                 block[r * 8 + c] = left[r];
             }
         }
-        let mode = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8);
+        let dq = crate::dequant::lookup_dequant(128);
+        let mode = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
         assert_eq!(mode, 2);
     }
 
@@ -2667,5 +2700,33 @@ mod tests {
         for &m in &ctx.left_mode {
             assert_eq!(m, 0);
         }
+    }
+
+    #[test]
+    fn rd_cost_zero_for_perfect_prediction() {
+        let source = [128u8; 64];
+        let prediction = [128u8; 64];
+        let dq = crate::dequant::lookup_dequant(128);
+        let cost = compute_rd_cost(&source, &prediction, dq.dc, dq.ac);
+        assert_eq!(cost, 0);
+    }
+
+    #[test]
+    fn rd_cost_higher_for_worse_prediction() {
+        let mut source = [0u8; 64];
+        for r in 0..8 {
+            for c in 0..8 {
+                source[r * 8 + c] = (100 + r * 10 + c * 5) as u8;
+            }
+        }
+        let good_pred = source;
+        let mut bad_pred = [0u8; 64];
+        for i in 0..64 {
+            bad_pred[i] = 255 - source[i];
+        }
+        let dq = crate::dequant::lookup_dequant(128);
+        let good_cost = compute_rd_cost(&source, &good_pred, dq.dc, dq.ac);
+        let bad_cost = compute_rd_cost(&source, &bad_pred, dq.dc, dq.ac);
+        assert!(good_cost < bad_cost);
     }
 }
