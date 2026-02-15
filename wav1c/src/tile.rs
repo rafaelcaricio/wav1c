@@ -9,7 +9,7 @@ mod dct;
 #[path = "scan.rs"]
 mod scan;
 
-use scan::{DEFAULT_SCAN_4X4, DEFAULT_SCAN_8X8, LO_CTX_OFFSETS_2D};
+use scan::{DEFAULT_SCAN_4X4, DEFAULT_SCAN_8X8, DEFAULT_SCAN_16X16, LO_CTX_OFFSETS_2D};
 
 const PARTITION_CTX_NONE: [u8; 5] = [0, 0x10, 0x18, 0x1c, 0x1e];
 
@@ -150,7 +150,8 @@ fn eob_to_bin(eob: usize) -> usize {
         8..=15 => 4,
         16..=31 => 5,
         32..=63 => 6,
-        _ => 7,
+        64..=127 => 7,
+        _ => 8,
     }
 }
 
@@ -602,7 +603,12 @@ fn encode_transform_block(
 ) -> (u8, bool, bool) {
     let chroma_idx = if is_chroma { 1 } else { 0 };
     let n = scan_table.len();
-    let w = if n == 16 { 4usize } else { 8usize };
+    let w = match n {
+        16 => 4usize,
+        64 => 8,
+        256 => 16,
+        _ => 8,
+    };
 
     let mut eob: i32 = -1;
     for (i, &sc) in scan_table[..n].iter().enumerate() {
@@ -623,17 +629,22 @@ fn encode_transform_block(
         if is_inter {
             enc.encode_bool(true, &mut cdf.txtp_inter);
         } else {
-            let t_dim_min = if scan_table.len() == 16 { 0usize } else { 1usize };
+            let t_dim_min = match n {
+                16 => 0usize,
+                64 => 1,
+                256 => 2,
+                _ => 1,
+            };
             enc.encode_symbol(txtype_to_intra2_symbol(tx_type), &mut cdf.txtp_intra2[t_dim_min][y_mode as usize], 4);
         }
     }
 
     let eob_bin = eob_to_bin(eob);
-    let n_eob_syms = if n == 16 { 4u32 } else { 6u32 };
-    let eob_cdf = if n == 16 {
-        &mut cdf.eob_bin_16[chroma_idx][0]
-    } else {
-        &mut cdf.eob_bin_64[chroma_idx][0]
+    let (n_eob_syms, eob_cdf) = match n {
+        16 => (4u32, &mut cdf.eob_bin_16[chroma_idx][0] as &mut [u16]),
+        64 => (6u32, &mut cdf.eob_bin_64[chroma_idx][0] as &mut [u16]),
+        256 => (8u32, &mut cdf.eob_bin_256[chroma_idx][0] as &mut [u16]),
+        _ => (6u32, &mut cdf.eob_bin_64[chroma_idx][0] as &mut [u16]),
     };
     enc.encode_symbol(eob_bin as u32, eob_cdf, n_eob_syms);
 
@@ -650,7 +661,12 @@ fn encode_transform_block(
     let levels_size = stride * (w + 2);
     let mut levels = vec![0u8; levels_size];
 
-    let tx2dszctx = if n == 16 { 0usize } else { 2 };
+    let tx2dszctx = match n {
+        16 => 0usize,
+        64 => 2,
+        256 => 4,
+        _ => 2,
+    };
     let eob_ctx = if eob == 0 {
         0
     } else {
@@ -1889,6 +1905,352 @@ impl<'a> TileEncoder<'a> {
         self.ctx.update_mode_ctx(bx, by, bl, self.mi_cols, self.mi_rows, y_mode);
     }
 
+    fn encode_block_16x16(&mut self, bx: u32, by: u32) {
+        let bl = 3;
+        let px_x = bx * 4;
+        let px_y = by * 4;
+        let w = self.pixels.width;
+        let h = self.pixels.height;
+        let cw = w.div_ceil(2);
+        let ch = h.div_ceil(2);
+        let chroma_px_x = px_x / 2;
+        let chroma_px_y = px_y / 2;
+
+        let have_above = by > 0;
+        let have_left = bx > 0;
+
+        let above_y: Vec<u8> = (0..32)
+            .map(|i| {
+                let idx = px_x as usize + i;
+                if have_above && idx < self.ctx.above_recon_y.len() {
+                    self.ctx.above_recon_y[idx]
+                } else if have_above && i < 16 {
+                    self.ctx.above_recon_y
+                        [(px_x as usize + 15).min(self.ctx.above_recon_y.len() - 1)]
+                } else {
+                    128
+                }
+            })
+            .collect();
+
+        let left_local_py = ((by & 15) * 4) as usize;
+        let left_y: Vec<u8> = (0..32)
+            .map(|i| {
+                let idx = left_local_py + i;
+                if have_left && idx < self.ctx.left_recon_y.len() {
+                    self.ctx.left_recon_y[idx]
+                } else if have_left && i < 16 {
+                    self.ctx.left_recon_y
+                        [(left_local_py + 15).min(self.ctx.left_recon_y.len() - 1)]
+                } else {
+                    128
+                }
+            })
+            .collect();
+
+        let top_left_y = if have_above && have_left {
+            if left_local_py > 0 {
+                self.ctx.left_recon_y[left_local_py - 1]
+            } else if (px_x as usize) > 0 {
+                self.ctx.above_recon_y[px_x as usize - 1]
+            } else {
+                128
+            }
+        } else {
+            128
+        };
+
+        let y_block = extract_block(&self.pixels.y, w, px_x, px_y, 16, w, h);
+
+        let (y_mode, y_angle_delta) = select_best_intra_mode(
+            &y_block,
+            &above_y,
+            &left_y,
+            top_left_y,
+            have_above,
+            have_left,
+            16,
+            16,
+            self.dq.dc,
+            self.dq.ac,
+        );
+        let y_pred_block = generate_prediction(
+            y_mode,
+            y_angle_delta,
+            &above_y,
+            &left_y,
+            top_left_y,
+            have_above,
+            have_left,
+            16,
+            16,
+        );
+        let y_txtype = dct::TxType::DctDct;
+
+        let u_pred = self.ctx.dc_prediction(bx, by, bl, 1);
+        let v_pred = self.ctx.dc_prediction(bx, by, bl, 2);
+
+        let u_block = extract_block(&self.pixels.u, cw, chroma_px_x, chroma_px_y, 8, cw, ch);
+        let v_block = extract_block(&self.pixels.v, cw, chroma_px_x, chroma_px_y, 8, cw, ch);
+
+        let mut y_residual = [0i32; 256];
+        for i in 0..256 {
+            y_residual[i] = y_block[i] as i32 - y_pred_block[i] as i32;
+        }
+        let y_dct = dct::forward_transform_16x16(&y_residual);
+        let y_quant = quantize_coeffs(&y_dct, 256, self.dq.dc, self.dq.ac);
+
+        let mut u_residual = [0i32; 64];
+        for i in 0..64 {
+            u_residual[i] = u_block[i] as i32 - u_pred as i32;
+        }
+        let u_dct = dct::forward_dct_8x8(&u_residual);
+        let u_quant = quantize_coeffs(&u_dct, 64, self.dq.dc, self.dq.ac);
+
+        let mut v_residual = [0i32; 64];
+        for i in 0..64 {
+            v_residual[i] = v_block[i] as i32 - v_pred as i32;
+        }
+        let v_dct = dct::forward_dct_8x8(&v_residual);
+        let v_quant = quantize_coeffs(&v_dct, 64, self.dq.dc, self.dq.ac);
+
+        let is_skip = y_quant.iter().all(|&c| c == 0)
+            && u_quant.iter().all(|&c| c == 0)
+            && v_quant.iter().all(|&c| c == 0);
+
+        let skip_ctx = self.ctx.skip_ctx(bx, by);
+        self.enc.encode_bool(is_skip, &mut self.cdf.skip[skip_ctx]);
+
+        let (above_mode_ctx, left_mode_ctx) = self.ctx.mode_ctx(bx, by);
+        self.enc.encode_symbol(
+            y_mode as u32,
+            &mut self.cdf.kf_y_mode[above_mode_ctx][left_mode_ctx],
+            12,
+        );
+
+        if (1..=8).contains(&y_mode) {
+            self.enc.encode_symbol(
+                (y_angle_delta + 3) as u32,
+                &mut self.cdf.angle_delta[(y_mode - 1) as usize],
+                6,
+            );
+        }
+
+        let cfl_allowed = bl >= 2;
+        let uv_n_syms = if cfl_allowed { 13 } else { 12 };
+        let cfl_idx = usize::from(cfl_allowed);
+        self.enc
+            .encode_symbol(0, &mut self.cdf.uv_mode[cfl_idx][y_mode as usize], uv_n_syms);
+
+        let (y_cul, y_dc_neg, y_dc_zero);
+        let (u_cul, u_dc_neg, u_dc_zero);
+        let (v_cul, v_dc_neg, v_dc_zero);
+
+        if !is_skip {
+            let y_txb_skip_ctx = 0;
+            let y_dc_sign_ctx = self.ctx.dc_sign_ctx(bx, by, bl, 0);
+            let y_result = encode_transform_block(
+                &mut self.enc,
+                &mut self.cdf,
+                &y_quant,
+                &DEFAULT_SCAN_16X16,
+                false,
+                false,
+                2,
+                y_txb_skip_ctx,
+                y_dc_sign_ctx,
+                y_mode,
+                y_txtype,
+            );
+            y_cul = y_result.0;
+            y_dc_neg = y_result.1;
+            y_dc_zero = y_result.2;
+
+            let u_txb_skip_ctx = self.ctx.chroma_txb_skip_ctx(bx, by, bl, 1);
+            let u_dc_sign_ctx = self.ctx.dc_sign_ctx(bx, by, bl, 1);
+            let u_result = encode_transform_block(
+                &mut self.enc,
+                &mut self.cdf,
+                &u_quant,
+                &DEFAULT_SCAN_8X8,
+                true,
+                false,
+                1,
+                u_txb_skip_ctx,
+                u_dc_sign_ctx,
+                y_mode,
+                dct::TxType::DctDct,
+            );
+            u_cul = u_result.0;
+            u_dc_neg = u_result.1;
+            u_dc_zero = u_result.2;
+
+            let v_txb_skip_ctx = self.ctx.chroma_txb_skip_ctx(bx, by, bl, 2);
+            let v_dc_sign_ctx = self.ctx.dc_sign_ctx(bx, by, bl, 2);
+            let v_result = encode_transform_block(
+                &mut self.enc,
+                &mut self.cdf,
+                &v_quant,
+                &DEFAULT_SCAN_8X8,
+                true,
+                false,
+                1,
+                v_txb_skip_ctx,
+                v_dc_sign_ctx,
+                y_mode,
+                dct::TxType::DctDct,
+            );
+            v_cul = v_result.0;
+            v_dc_neg = v_result.1;
+            v_dc_zero = v_result.2;
+        } else {
+            y_cul = 0;
+            y_dc_neg = false;
+            y_dc_zero = true;
+            u_cul = 0;
+            u_dc_neg = false;
+            u_dc_zero = true;
+            v_cul = 0;
+            v_dc_neg = false;
+            v_dc_zero = true;
+        }
+
+        let y_deq = dequantize_coeffs(&y_quant, 256, self.dq.dc, self.dq.ac);
+        let mut y_deq_arr = [0i32; 256];
+        y_deq_arr.copy_from_slice(&y_deq);
+        let y_recon_residual = dct::inverse_transform_16x16(&y_deq_arr);
+
+        for r in 0..16u32 {
+            for c in 0..16u32 {
+                let dest_x = px_x + c;
+                let dest_y = px_y + r;
+                if dest_x < w && dest_y < h {
+                    let pixel = (y_pred_block[(r * 16 + c) as usize] as i32
+                        + y_recon_residual[(r * 16 + c) as usize])
+                        .clamp(0, 255) as u8;
+                    self.recon.y[(dest_y * w + dest_x) as usize] = pixel;
+                }
+            }
+        }
+
+        let u_deq = dequantize_coeffs(&u_quant, 64, self.dq.dc, self.dq.ac);
+        let mut u_deq_arr = [0i32; 64];
+        u_deq_arr.copy_from_slice(&u_deq);
+        let u_recon_residual = dct::inverse_dct_8x8(&u_deq_arr);
+
+        for r in 0..8u32 {
+            for c in 0..8u32 {
+                let dest_x = chroma_px_x + c;
+                let dest_y = chroma_px_y + r;
+                if dest_x < cw && dest_y < ch {
+                    let pixel = (u_pred as i32 + u_recon_residual[(r * 8 + c) as usize])
+                        .clamp(0, 255) as u8;
+                    self.recon.u[(dest_y * cw + dest_x) as usize] = pixel;
+                }
+            }
+        }
+
+        let v_deq = dequantize_coeffs(&v_quant, 64, self.dq.dc, self.dq.ac);
+        let mut v_deq_arr = [0i32; 64];
+        v_deq_arr.copy_from_slice(&v_deq);
+        let v_recon_residual = dct::inverse_dct_8x8(&v_deq_arr);
+
+        for r in 0..8u32 {
+            for c in 0..8u32 {
+                let dest_x = chroma_px_x + c;
+                let dest_y = chroma_px_y + r;
+                if dest_x < cw && dest_y < ch {
+                    let pixel = (v_pred as i32 + v_recon_residual[(r * 8 + c) as usize])
+                        .clamp(0, 255) as u8;
+                    self.recon.v[(dest_y * cw + dest_x) as usize] = pixel;
+                }
+            }
+        }
+
+        let mut y_bottom_row = vec![128u8; 16];
+        let mut y_right_col = vec![128u8; 16];
+        for c in 0..16u32 {
+            let dest_x = px_x + c;
+            let dest_y = px_y + 15;
+            if dest_x < w && dest_y < h {
+                y_bottom_row[c as usize] = self.recon.y[(dest_y * w + dest_x) as usize];
+            }
+        }
+        for r in 0..16u32 {
+            let dest_x = px_x + 15;
+            let dest_y = px_y + r;
+            if dest_x < w && dest_y < h {
+                y_right_col[r as usize] = self.recon.y[(dest_y * w + dest_x) as usize];
+            }
+        }
+
+        let mut u_bottom_row = vec![128u8; 8];
+        let mut u_right_col = vec![128u8; 8];
+        for c in 0..8u32 {
+            let dest_x = chroma_px_x + c;
+            let dest_y = chroma_px_y + 7;
+            if dest_x < cw && dest_y < ch {
+                u_bottom_row[c as usize] = self.recon.u[(dest_y * cw + dest_x) as usize];
+            }
+        }
+        for r in 0..8u32 {
+            let dest_x = chroma_px_x + 7;
+            let dest_y = chroma_px_y + r;
+            if dest_x < cw && dest_y < ch {
+                u_right_col[r as usize] = self.recon.u[(dest_y * cw + dest_x) as usize];
+            }
+        }
+
+        let mut v_bottom_row = vec![128u8; 8];
+        let mut v_right_col = vec![128u8; 8];
+        for c in 0..8u32 {
+            let dest_x = chroma_px_x + c;
+            let dest_y = chroma_px_y + 7;
+            if dest_x < cw && dest_y < ch {
+                v_bottom_row[c as usize] = self.recon.v[(dest_y * cw + dest_x) as usize];
+            }
+        }
+        for r in 0..8u32 {
+            let dest_x = chroma_px_x + 7;
+            let dest_y = chroma_px_y + r;
+            if dest_x < cw && dest_y < ch {
+                v_right_col[r as usize] = self.recon.v[(dest_y * cw + dest_x) as usize];
+            }
+        }
+
+        self.ctx.update_recon(
+            bx,
+            by,
+            self.mi_cols,
+            self.mi_rows,
+            &y_bottom_row,
+            &y_right_col,
+            &u_bottom_row,
+            &u_right_col,
+            &v_bottom_row,
+            &v_right_col,
+        );
+        let y_cf_ctx = coef_ctx_value(y_cul, y_dc_neg, y_dc_zero);
+        let u_cf_ctx = coef_ctx_value(u_cul, u_dc_neg, u_dc_zero);
+        let v_cf_ctx = coef_ctx_value(v_cul, v_dc_neg, v_dc_zero);
+        self.ctx.update_coef_ctx(
+            bx,
+            by,
+            bl,
+            self.mi_cols,
+            self.mi_rows,
+            y_cf_ctx,
+            u_cf_ctx,
+            v_cf_ctx,
+        );
+        self.ctx
+            .update_partition_ctx(bx, by, bl, self.mi_cols, self.mi_rows);
+        self.ctx
+            .update_skip_ctx(bx, by, bl, self.mi_cols, self.mi_rows, is_skip);
+        self.ctx
+            .update_mode_ctx(bx, by, bl, self.mi_cols, self.mi_rows, y_mode);
+    }
+
     fn skip_mse(&self, bx: u32, by: u32, bl: usize) -> u64 {
         let px_x = bx * 4;
         let px_y = by * 4;
@@ -2023,7 +2385,7 @@ impl<'a> TileEncoder<'a> {
 
         if have_h_split && have_v_split {
             let part_ctx = self.ctx.partition_ctx(bx, by, bl);
-            if bl < 4 {
+            if bl < 3 {
                 if self.should_use_partition_none(bx, by, bl) {
                     self.enc.encode_symbol(
                         0,
@@ -2042,6 +2404,13 @@ impl<'a> TileEncoder<'a> {
                     self.encode_partition(bl + 1, bx, by + hsz);
                     self.encode_partition(bl + 1, bx + hsz, by + hsz);
                 }
+            } else if bl == 3 {
+                self.enc.encode_symbol(
+                    0,
+                    &mut self.cdf.partition[bl][part_ctx],
+                    PARTITION_NSYMS[bl],
+                );
+                self.encode_block_16x16(bx, by);
             } else {
                 self.enc.encode_symbol(
                     0,
@@ -3349,6 +3718,10 @@ mod tests {
         assert_eq!(eob_to_bin(31), 5);
         assert_eq!(eob_to_bin(32), 6);
         assert_eq!(eob_to_bin(63), 6);
+        assert_eq!(eob_to_bin(64), 7);
+        assert_eq!(eob_to_bin(127), 7);
+        assert_eq!(eob_to_bin(128), 8);
+        assert_eq!(eob_to_bin(255), 8);
     }
 
     #[test]
