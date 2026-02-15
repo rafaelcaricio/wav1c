@@ -34,7 +34,8 @@ size_t wav1c_encoder_headers(Wav1cEncoder *enc, const uint8_t **out_data);
 int wav1c_encoder_send_frame(Wav1cEncoder *enc,
                              const uint8_t *y, size_t y_len,
                              const uint8_t *u, size_t u_len,
-                             const uint8_t *v, size_t v_len);
+                             const uint8_t *v, size_t v_len,
+                             int y_stride, int uv_stride);
 
 Wav1cPacket *wav1c_encoder_receive_packet(Wav1cEncoder *enc);
 
