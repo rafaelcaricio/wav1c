@@ -1654,8 +1654,14 @@ impl<'a> TileEncoder<'a> {
     }
 
     fn should_use_partition_none(&self, bx: u32, by: u32, bl: usize) -> bool {
-        let threshold = (self.dq.ac as u64 * self.dq.ac as u64) / 64;
-        self.skip_mse(bx, by, bl) <= threshold
+        let base = self.dq.ac as u64 * self.dq.ac as u64;
+        let divisor = match bl {
+            1 => 16,
+            2 => 32,
+            3 => 48,
+            _ => 64,
+        };
+        self.skip_mse(bx, by, bl) <= base / divisor
     }
 
     fn encode_skip_block(&mut self, bx: u32, by: u32, bl: usize) {
@@ -1757,7 +1763,7 @@ impl<'a> TileEncoder<'a> {
         if have_h_split && have_v_split {
             let part_ctx = self.ctx.partition_ctx(bx, by, bl);
             if bl < 4 {
-                if bl >= 2 && self.should_use_partition_none(bx, by, bl) {
+                if self.should_use_partition_none(bx, by, bl) {
                     self.enc.encode_symbol(
                         0,
                         &mut self.cdf.partition[bl][part_ctx],
