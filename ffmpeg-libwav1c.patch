@@ -60,10 +60,10 @@ index 042b07c895..d19aa5fec6 100644
  extern const FFCodec ff_libtwolame_encoder;
 diff --git a/libavcodec/libwav1c.c b/libavcodec/libwav1c.c
 new file mode 100644
-index 0000000000..0d6e5b1a33
+index 0000000000..34f4baf8c1
 --- /dev/null
 +++ b/libavcodec/libwav1c.c
-@@ -0,0 +1,224 @@
+@@ -0,0 +1,226 @@
 +/*
 + * wav1c AV1 encoder wrapper for FFmpeg
 + *
@@ -177,7 +177,9 @@ index 0000000000..0d6e5b1a33
 +    ret = wav1c_encoder_send_frame(ctx->encoder,
 +                                   frame->data[0], y_size,
 +                                   frame->data[1], uv_size,
-+                                   frame->data[2], uv_size);
++                                   frame->data[2], uv_size,
++                                   frame->linesize[0],
++                                   frame->linesize[1]);
 +    if (ret < 0) {
 +        av_log(avctx, AV_LOG_ERROR, "Error sending frame to wav1c encoder\n");
 +        return AVERROR_EXTERNAL;
