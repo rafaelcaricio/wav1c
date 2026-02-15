@@ -73,6 +73,24 @@ const DR_INTRA_DERIVATIVE: [u16; 44] = [
        3,
 ];
 
+const TXTP_INTRA2_MAP: [dct::TxType; 5] = [
+    dct::TxType::Idtx,
+    dct::TxType::DctDct,
+    dct::TxType::AdstAdst,
+    dct::TxType::AdstDct,
+    dct::TxType::DctAdst,
+];
+
+fn txtype_to_intra2_symbol(tx: dct::TxType) -> u32 {
+    match tx {
+        dct::TxType::Idtx => 0,
+        dct::TxType::DctDct => 1,
+        dct::TxType::AdstAdst => 2,
+        dct::TxType::AdstDct => 3,
+        dct::TxType::DctAdst => 4,
+    }
+}
+
 fn encode_hi_tok(enc: &mut MsacEncoder, cdf: &mut [u16], dc_tok: u32) {
     let mut base = 3;
     for _ in 0..4 {
@@ -395,18 +413,18 @@ fn compute_sad(source: &[u8], prediction: &[u8]) -> u32 {
         .sum()
 }
 
-fn compute_rd_cost(source: &[u8], prediction: &[u8], dc_dq: u32, ac_dq: u32) -> u64 {
+fn compute_rd_cost(source: &[u8], prediction: &[u8], dc_dq: u32, ac_dq: u32, tx_type: dct::TxType) -> u64 {
     let mut residual = [0i32; 64];
     for i in 0..64 {
         residual[i] = source[i] as i32 - prediction[i] as i32;
     }
 
-    let dct_coeffs = dct::forward_dct_8x8(&residual);
+    let dct_coeffs = dct::forward_transform_8x8(&residual, tx_type);
     let quant = quantize_coeffs(&dct_coeffs, 64, dc_dq, ac_dq);
     let deq = dequantize_coeffs(&quant, 64, dc_dq, ac_dq);
     let mut deq_arr = [0i32; 64];
     deq_arr.copy_from_slice(&deq);
-    let recon_residual = dct::inverse_dct_8x8(&deq_arr);
+    let recon_residual = dct::inverse_transform_8x8(&deq_arr, tx_type);
 
     let mut sse: u64 = 0;
     for i in 0..64 {
@@ -436,11 +454,11 @@ fn select_best_intra_mode(
 ) -> u8 {
     let dc = predict_dc(above, left, have_above, have_left, w, h);
     let mut best_mode = 0u8;
-    let mut best_cost = compute_rd_cost(source, &dc, dc_dq, ac_dq);
+    let mut best_cost = compute_rd_cost(source, &dc, dc_dq, ac_dq, dct::TxType::DctDct);
 
     if have_above {
         let v = predict_v(above, w, h);
-        let cost = compute_rd_cost(source, &v, dc_dq, ac_dq);
+        let cost = compute_rd_cost(source, &v, dc_dq, ac_dq, dct::TxType::DctDct);
         if cost < best_cost {
             best_cost = cost;
             best_mode = 1;
@@ -449,7 +467,7 @@ fn select_best_intra_mode(
 
     if have_left {
         let hp = predict_h(left, w, h);
-        let cost = compute_rd_cost(source, &hp, dc_dq, ac_dq);
+        let cost = compute_rd_cost(source, &hp, dc_dq, ac_dq, dct::TxType::DctDct);
         if cost < best_cost {
             best_cost = cost;
             best_mode = 2;
@@ -458,28 +476,28 @@ fn select_best_intra_mode(
 
     if have_above && have_left {
         let smooth = predict_smooth(above, left, w, h);
-        let cost = compute_rd_cost(source, &smooth, dc_dq, ac_dq);
+        let cost = compute_rd_cost(source, &smooth, dc_dq, ac_dq, dct::TxType::DctDct);
         if cost < best_cost {
             best_cost = cost;
             best_mode = 9;
         }
 
         let sv = predict_smooth_v(above, left, w, h);
-        let cost = compute_rd_cost(source, &sv, dc_dq, ac_dq);
+        let cost = compute_rd_cost(source, &sv, dc_dq, ac_dq, dct::TxType::DctDct);
         if cost < best_cost {
             best_cost = cost;
             best_mode = 10;
         }
 
         let sh = predict_smooth_h(above, left, w, h);
-        let cost = compute_rd_cost(source, &sh, dc_dq, ac_dq);
+        let cost = compute_rd_cost(source, &sh, dc_dq, ac_dq, dct::TxType::DctDct);
         if cost < best_cost {
             best_cost = cost;
             best_mode = 11;
         }
 
         let paeth = predict_paeth(above, left, top_left, w, h);
-        let cost = compute_rd_cost(source, &paeth, dc_dq, ac_dq);
+        let cost = compute_rd_cost(source, &paeth, dc_dq, ac_dq, dct::TxType::DctDct);
         if cost < best_cost {
             best_cost = cost;
             best_mode = 12;
@@ -487,7 +505,7 @@ fn select_best_intra_mode(
 
         for mode in 3..=8u8 {
             let pred = generate_prediction(mode, above, left, top_left, true, true, w, h);
-            let cost = compute_rd_cost(source, &pred, dc_dq, ac_dq);
+            let cost = compute_rd_cost(source, &pred, dc_dq, ac_dq, dct::TxType::DctDct);
             if cost < best_cost {
                 best_cost = cost;
                 best_mode = mode;
@@ -496,6 +514,24 @@ fn select_best_intra_mode(
     }
 
     best_mode
+}
+
+fn select_best_txtype(source: &[u8], prediction: &[u8], dc_dq: u32, ac_dq: u32) -> dct::TxType {
+    let mut best_type = dct::TxType::DctDct;
+    let mut best_cost = compute_rd_cost(source, prediction, dc_dq, ac_dq, dct::TxType::DctDct);
+
+    for &tx in &TXTP_INTRA2_MAP {
+        if tx == dct::TxType::DctDct {
+            continue;
+        }
+        let cost = compute_rd_cost(source, prediction, dc_dq, ac_dq, tx);
+        if cost < best_cost {
+            best_cost = cost;
+            best_type = tx;
+        }
+    }
+
+    best_type
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -510,6 +546,7 @@ fn encode_transform_block(
     txb_skip_ctx: usize,
     dc_sign_ctx: usize,
     y_mode: u8,
+    tx_type: dct::TxType,
 ) -> (u8, bool, bool) {
     let chroma_idx = if is_chroma { 1 } else { 0 };
     let n = scan_table.len();
@@ -535,7 +572,7 @@ fn encode_transform_block(
             enc.encode_bool(true, &mut cdf.txtp_inter);
         } else {
             let t_dim_min = if scan_table.len() == 16 { 0usize } else { 1usize };
-            enc.encode_symbol(1, &mut cdf.txtp_intra2[t_dim_min][y_mode as usize], 4);
+            enc.encode_symbol(txtype_to_intra2_symbol(tx_type), &mut cdf.txtp_intra2[t_dim_min][y_mode as usize], 4);
         }
     }
 
@@ -1338,6 +1375,7 @@ impl<'a> TileEncoder<'a> {
             y_mode, &above_y, &left_y, top_left_y,
             have_above, have_left, 8, 8,
         );
+        let y_txtype = select_best_txtype(&y_block, &y_pred_block, self.dq.dc, self.dq.ac);
 
         let u_pred = self.ctx.dc_prediction(bx, by, bl, 1);
         let v_pred = self.ctx.dc_prediction(bx, by, bl, 2);
@@ -1349,7 +1387,7 @@ impl<'a> TileEncoder<'a> {
         for i in 0..64 {
             y_residual[i] = y_block[i] as i32 - y_pred_block[i] as i32;
         }
-        let y_dct = dct::forward_dct_8x8(&y_residual);
+        let y_dct = dct::forward_transform_8x8(&y_residual, y_txtype);
         let y_quant = quantize_coeffs(&y_dct, 64, self.dq.dc, self.dq.ac);
 
         let mut u_residual = [0i32; 16];
@@ -1404,6 +1442,7 @@ impl<'a> TileEncoder<'a> {
                 y_txb_skip_ctx,
                 y_dc_sign_ctx,
                 y_mode,
+                y_txtype,
             );
             y_cul = y_result.0;
             y_dc_neg = y_result.1;
@@ -1422,6 +1461,7 @@ impl<'a> TileEncoder<'a> {
                 u_txb_skip_ctx,
                 u_dc_sign_ctx,
                 y_mode,
+                dct::TxType::DctDct,
             );
             u_cul = u_result.0;
             u_dc_neg = u_result.1;
@@ -1440,6 +1480,7 @@ impl<'a> TileEncoder<'a> {
                 v_txb_skip_ctx,
                 v_dc_sign_ctx,
                 y_mode,
+                dct::TxType::DctDct,
             );
             v_cul = v_result.0;
             v_dc_neg = v_result.1;
@@ -1459,7 +1500,7 @@ impl<'a> TileEncoder<'a> {
         let y_deq = dequantize_coeffs(&y_quant, 64, self.dq.dc, self.dq.ac);
         let mut y_deq_arr = [0i32; 64];
         y_deq_arr.copy_from_slice(&y_deq);
-        let y_recon_residual = dct::inverse_dct_8x8(&y_deq_arr);
+        let y_recon_residual = dct::inverse_transform_8x8(&y_deq_arr, y_txtype);
 
         for r in 0..8u32 {
             for c in 0..8u32 {
@@ -1907,6 +1948,7 @@ impl<'a> InterTileEncoder<'a> {
                 y_txb_skip_ctx,
                 y_dc_sign_ctx,
                 0,
+                dct::TxType::DctDct,
             );
             y_cul = y_result.0;
             y_dc_neg = y_result.1;
@@ -1925,6 +1967,7 @@ impl<'a> InterTileEncoder<'a> {
                 u_txb_skip_ctx,
                 u_dc_sign_ctx,
                 0,
+                dct::TxType::DctDct,
             );
             u_cul = u_result.0;
             u_dc_neg = u_result.1;
@@ -1943,6 +1986,7 @@ impl<'a> InterTileEncoder<'a> {
                 v_txb_skip_ctx,
                 v_dc_sign_ctx,
                 0,
+                dct::TxType::DctDct,
             );
             v_cul = v_result.0;
             v_dc_neg = v_result.1;
@@ -2701,7 +2745,7 @@ mod tests {
         let mut cdf = CdfContext::default();
         let coeffs = vec![0i32; 16];
         let (cul, dc_neg, dc_zero) = encode_transform_block(
-            &mut enc, &mut cdf, &coeffs, &DEFAULT_SCAN_4X4, false, false, 0, 0, 0, 0,
+            &mut enc, &mut cdf, &coeffs, &DEFAULT_SCAN_4X4, false, false, 0, 0, 0, 0, dct::TxType::DctDct,
         );
         assert_eq!(cul, 0);
         assert!(!dc_neg);
@@ -2715,7 +2759,7 @@ mod tests {
         let mut coeffs = vec![0i32; 64];
         coeffs[0] = 2;
         let (cul, dc_neg, dc_zero) = encode_transform_block(
-            &mut enc, &mut cdf, &coeffs, &DEFAULT_SCAN_8X8, false, false, 1, 0, 0, 0,
+            &mut enc, &mut cdf, &coeffs, &DEFAULT_SCAN_8X8, false, false, 1, 0, 0, 0, dct::TxType::DctDct,
         );
         assert!(cul > 0);
         assert!(!dc_neg);
@@ -2731,7 +2775,7 @@ mod tests {
         coeffs[1] = -2;
         coeffs[8] = 1;
         let (cul, _dc_neg, dc_zero) = encode_transform_block(
-            &mut enc, &mut cdf, &coeffs, &DEFAULT_SCAN_8X8, false, false, 1, 0, 0, 0,
+            &mut enc, &mut cdf, &coeffs, &DEFAULT_SCAN_8X8, false, false, 1, 0, 0, 0, dct::TxType::DctDct,
         );
         assert!(cul > 0);
         assert!(!dc_zero);
@@ -2886,7 +2930,7 @@ mod tests {
         let source = [128u8; 64];
         let prediction = [128u8; 64];
         let dq = crate::dequant::lookup_dequant(128);
-        let cost = compute_rd_cost(&source, &prediction, dq.dc, dq.ac);
+        let cost = compute_rd_cost(&source, &prediction, dq.dc, dq.ac, dct::TxType::DctDct);
         assert_eq!(cost, 0);
     }
 
@@ -2904,8 +2948,8 @@ mod tests {
             bad_pred[i] = 255 - source[i];
         }
         let dq = crate::dequant::lookup_dequant(128);
-        let good_cost = compute_rd_cost(&source, &good_pred, dq.dc, dq.ac);
-        let bad_cost = compute_rd_cost(&source, &bad_pred, dq.dc, dq.ac);
+        let good_cost = compute_rd_cost(&source, &good_pred, dq.dc, dq.ac, dct::TxType::DctDct);
+        let bad_cost = compute_rd_cost(&source, &bad_pred, dq.dc, dq.ac, dct::TxType::DctDct);
         assert!(good_cost < bad_cost);
     }
 
