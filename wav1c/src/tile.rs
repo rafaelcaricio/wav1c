@@ -15,6 +15,32 @@ const PARTITION_CTX_NONE: [u8; 5] = [0, 0x10, 0x18, 0x1c, 0x1e];
 
 const PARTITION_NSYMS: [u32; 5] = [9, 9, 9, 9, 3];
 
+const INTRA_MODE_CONTEXT: [usize; 13] = [
+    0, 1, 2, 3, 4, 4, 4, 4, 3, 0, 1, 2, 0,
+];
+
+#[rustfmt::skip]
+const SM_WEIGHTS: [u8; 128] = [
+      0,   0,
+    255, 128,
+    255, 149,  85,  64,
+    255, 197, 146, 105,  73,  50,  37,  32,
+    255, 225, 196, 170, 145, 123, 102,  84,
+     68,  54,  43,  33,  26,  20,  17,  16,
+    255, 240, 225, 210, 196, 182, 169, 157,
+    145, 133, 122, 111, 101,  92,  83,  74,
+     66,  59,  52,  45,  39,  34,  29,  25,
+     21,  17,  14,  12,  10,   9,   8,   8,
+    255, 248, 240, 233, 225, 218, 210, 203,
+    196, 189, 182, 176, 169, 163, 156, 150,
+    144, 138, 133, 127, 121, 116, 111, 106,
+    101,  96,  91,  86,  82,  77,  73,  69,
+     65,  61,  57,  54,  50,  47,  44,  41,
+     38,  35,  32,  29,  27,  25,  22,  20,
+     18,  16,  15,  13,  12,  10,   9,   8,
+      7,   6,   6,   5,   5,   4,   4,   4,
+];
+
 fn encode_hi_tok(enc: &mut MsacEncoder, cdf: &mut [u16], dc_tok: u32) {
     let mut base = 3;
     for _ in 0..4 {
@@ -75,6 +101,199 @@ fn coef_ctx_value(cul_level: u8, dc_sign_negative: bool, dc_is_zero: bool) -> u8
     cul_level | dc_sign_level
 }
 
+fn predict_dc(above: &[u8], left: &[u8], have_above: bool, have_left: bool, w: usize, h: usize) -> Vec<u8> {
+    let val = if have_above && have_left {
+        let sum: u32 = above[..w].iter().chain(left[..h].iter()).map(|&x| x as u32).sum();
+        ((sum + (w + h) as u32 / 2) / (w + h) as u32) as u8
+    } else if have_above {
+        let sum: u32 = above[..w].iter().map(|&x| x as u32).sum();
+        ((sum + w as u32 / 2) / w as u32) as u8
+    } else if have_left {
+        let sum: u32 = left[..h].iter().map(|&x| x as u32).sum();
+        ((sum + h as u32 / 2) / h as u32) as u8
+    } else {
+        128
+    };
+    vec![val; w * h]
+}
+
+fn predict_v(above: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut out = vec![0u8; w * h];
+    for r in 0..h {
+        out[r * w..r * w + w].copy_from_slice(&above[..w]);
+    }
+    out
+}
+
+fn predict_h(left: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut out = vec![0u8; w * h];
+    for r in 0..h {
+        for c in 0..w {
+            out[r * w + c] = left[r];
+        }
+    }
+    out
+}
+
+fn predict_paeth(above: &[u8], left: &[u8], top_left: u8, w: usize, h: usize) -> Vec<u8> {
+    let mut out = vec![0u8; w * h];
+    let tl = top_left as i32;
+    for r in 0..h {
+        let l = left[r] as i32;
+        for c in 0..w {
+            let t = above[c] as i32;
+            let base = l + t - tl;
+            let p_left = (base - l).abs();
+            let p_top = (base - t).abs();
+            let p_tl = (base - tl).abs();
+            out[r * w + c] = if p_left <= p_top && p_left <= p_tl {
+                left[r]
+            } else if p_top <= p_tl {
+                above[c]
+            } else {
+                top_left
+            };
+        }
+    }
+    out
+}
+
+fn predict_smooth(above: &[u8], left: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut out = vec![0u8; w * h];
+    let weights_x = &SM_WEIGHTS[w..w * 2];
+    let weights_y = &SM_WEIGHTS[h..h * 2];
+    let right = above[w - 1] as i32;
+    let bottom = left[h - 1] as i32;
+    for r in 0..h {
+        for c in 0..w {
+            let wy = weights_y[r] as i32;
+            let wx = weights_x[c] as i32;
+            let pred = wy * above[c] as i32
+                + (256 - wy) * bottom
+                + wx * left[r] as i32
+                + (256 - wx) * right;
+            out[r * w + c] = ((pred + 256) >> 9) as u8;
+        }
+    }
+    out
+}
+
+fn predict_smooth_v(above: &[u8], left: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut out = vec![0u8; w * h];
+    let weights = &SM_WEIGHTS[h..h * 2];
+    let bottom = left[h - 1] as i32;
+    for r in 0..h {
+        let wy = weights[r] as i32;
+        for c in 0..w {
+            let pred = wy * above[c] as i32 + (256 - wy) * bottom;
+            out[r * w + c] = ((pred + 128) >> 8) as u8;
+        }
+    }
+    out
+}
+
+fn predict_smooth_h(above: &[u8], left: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut out = vec![0u8; w * h];
+    let weights = &SM_WEIGHTS[w..w * 2];
+    let right = above[w - 1] as i32;
+    for r in 0..h {
+        let l = left[r] as i32;
+        for c in 0..w {
+            let wx = weights[c] as i32;
+            let pred = wx * l + (256 - wx) * right;
+            out[r * w + c] = ((pred + 128) >> 8) as u8;
+        }
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_prediction(
+    mode: u8, above: &[u8], left: &[u8], top_left: u8,
+    have_above: bool, have_left: bool, w: usize, h: usize,
+) -> Vec<u8> {
+    match mode {
+        1 => predict_v(above, w, h),
+        2 => predict_h(left, w, h),
+        9 => predict_smooth(above, left, w, h),
+        10 => predict_smooth_v(above, left, w, h),
+        11 => predict_smooth_h(above, left, w, h),
+        12 => predict_paeth(above, left, top_left, w, h),
+        _ => predict_dc(above, left, have_above, have_left, w, h),
+    }
+}
+
+fn compute_sad(source: &[u8], prediction: &[u8]) -> u32 {
+    source.iter().zip(prediction.iter())
+        .map(|(&s, &p)| (s as i32 - p as i32).unsigned_abs())
+        .sum()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn select_best_intra_mode(
+    source: &[u8],
+    above: &[u8],
+    left: &[u8],
+    top_left: u8,
+    have_above: bool,
+    have_left: bool,
+    w: usize,
+    h: usize,
+) -> u8 {
+    let dc = predict_dc(above, left, have_above, have_left, w, h);
+    let mut best_mode = 0u8;
+    let mut best_sad = compute_sad(source, &dc);
+
+    if have_above {
+        let v = predict_v(above, w, h);
+        let sad = compute_sad(source, &v);
+        if sad < best_sad {
+            best_sad = sad;
+            best_mode = 1;
+        }
+    }
+
+    if have_left {
+        let hp = predict_h(left, w, h);
+        let sad = compute_sad(source, &hp);
+        if sad < best_sad {
+            best_sad = sad;
+            best_mode = 2;
+        }
+    }
+
+    if have_above && have_left {
+        let smooth = predict_smooth(above, left, w, h);
+        let sad = compute_sad(source, &smooth);
+        if sad < best_sad {
+            best_sad = sad;
+            best_mode = 9;
+        }
+
+        let sv = predict_smooth_v(above, left, w, h);
+        let sad = compute_sad(source, &sv);
+        if sad < best_sad {
+            best_sad = sad;
+            best_mode = 10;
+        }
+
+        let sh = predict_smooth_h(above, left, w, h);
+        let sad = compute_sad(source, &sh);
+        if sad < best_sad {
+            best_sad = sad;
+            best_mode = 11;
+        }
+
+        let paeth = predict_paeth(above, left, top_left, w, h);
+        let sad = compute_sad(source, &paeth);
+        if sad < best_sad {
+            best_mode = 12;
+        }
+    }
+
+    best_mode
+}
+
 #[allow(clippy::too_many_arguments)]
 fn encode_transform_block(
     enc: &mut MsacEncoder,
@@ -86,15 +305,15 @@ fn encode_transform_block(
     t_dim_ctx: usize,
     txb_skip_ctx: usize,
     dc_sign_ctx: usize,
+    y_mode: u8,
 ) -> (u8, bool, bool) {
     let chroma_idx = if is_chroma { 1 } else { 0 };
     let n = scan_table.len();
     let w = if n == 16 { 4usize } else { 8usize };
 
     let mut eob: i32 = -1;
-    for i in 0..n {
-        let rc = scan_table[i] as usize;
-        if coeffs[rc] != 0 {
+    for (i, &sc) in scan_table[..n].iter().enumerate() {
+        if coeffs[sc as usize] != 0 {
             eob = i as i32;
         }
     }
@@ -111,7 +330,8 @@ fn encode_transform_block(
         if is_inter {
             enc.encode_bool(true, &mut cdf.txtp_inter);
         } else {
-            enc.encode_symbol(1, &mut cdf.txtp_intra, 4);
+            let t_dim_min = if scan_table.len() == 16 { 0usize } else { 1usize };
+            enc.encode_symbol(1, &mut cdf.txtp_intra2[t_dim_min][y_mode as usize], 4);
         }
     }
 
@@ -174,7 +394,7 @@ fn encode_transform_block(
         let level = coeffs[rc].unsigned_abs();
 
         let (ctx, _hi_mag) = get_lo_ctx(&levels[rc..], stride, x, y);
-        let tok = level.min(3) as u32;
+        let tok = level.min(3);
         enc.encode_symbol(tok, &mut cdf.base_tok[t_dim_ctx][chroma_idx][ctx], 3);
 
         if level >= 3 {
@@ -190,7 +410,7 @@ fn encode_transform_block(
     if eob > 0 {
         let level = coeffs[0].unsigned_abs();
 
-        let tok = level.min(3) as u32;
+        let tok = level.min(3);
         enc.encode_symbol(tok, &mut cdf.base_tok[t_dim_ctx][chroma_idx][0], 3);
 
         if level >= 3 {
@@ -210,8 +430,8 @@ fn encode_transform_block(
         enc.encode_golomb(coeffs[0].unsigned_abs() - 15);
     }
 
-    for i in 1..=eob {
-        let rc = scan_table[i] as usize;
+    for &sc in &scan_table[1..=eob] {
+        let rc = sc as usize;
         if coeffs[rc] != 0 {
             enc.encode_bool_equi(coeffs[rc] < 0);
             if coeffs[rc].unsigned_abs() >= 15 {
@@ -323,6 +543,8 @@ struct TileContext {
     left_ccoef: [[u8; 16]; 2],
     above_intra: Vec<bool>,
     left_intra: [bool; 32],
+    above_mode: Vec<u8>,
+    left_mode: [u8; 32],
 }
 
 impl TileContext {
@@ -354,6 +576,8 @@ impl TileContext {
             left_ccoef: [[0x40u8; 16]; 2],
             above_intra: vec![false; above_inter_size],
             left_intra: [false; 32],
+            above_mode: vec![0u8; mi_cols as usize + 32],
+            left_mode: [0u8; 32],
         }
     }
 
@@ -366,6 +590,7 @@ impl TileContext {
         self.left_lcoef = [0x40u8; 32];
         self.left_ccoef = [[0x40u8; 16]; 2];
         self.left_intra = [false; 32];
+        self.left_mode = [0u8; 32];
     }
 
     fn partition_ctx(&self, bx: u32, by: u32, bl: usize) -> usize {
@@ -653,14 +878,14 @@ impl TileContext {
         let max_py = (mi_rows * 4) as usize;
         let py_abs = (by * 4) as usize;
 
-        for i in 0..y_bottom_row.len() {
+        for (i, &val) in y_bottom_row.iter().enumerate() {
             if px_x + i < max_px_x && px_x + i < self.above_recon_y.len() {
-                self.above_recon_y[px_x + i] = y_bottom_row[i];
+                self.above_recon_y[px_x + i] = val;
             }
         }
-        for i in 0..y_right_col.len() {
+        for (i, &val) in y_right_col.iter().enumerate() {
             if py_abs + i < max_py && py_local + i < self.left_recon_y.len() {
-                self.left_recon_y[py_local + i] = y_right_col[i];
+                self.left_recon_y[py_local + i] = val;
             }
         }
 
@@ -778,6 +1003,48 @@ impl TileContext {
             }
         }
     }
+
+    fn update_mode_ctx(&mut self, bx: u32, by: u32, bl: usize, mi_cols: u32, mi_rows: u32, mode: u8) {
+        let bx4 = bx as usize;
+        let by4 = (by & 31) as usize;
+        let bw4 = 2 * (16usize >> bl);
+        let aw = min(bw4, (mi_cols - bx) as usize);
+        let lh = min(bw4, (mi_rows - by) as usize);
+        for i in 0..aw {
+            if bx4 + i < self.above_mode.len() {
+                self.above_mode[bx4 + i] = mode;
+            }
+        }
+        for i in 0..lh {
+            if by4 + i < 32 {
+                self.left_mode[by4 + i] = mode;
+            }
+        }
+    }
+
+    fn mode_ctx(&self, bx: u32, by: u32) -> (usize, usize) {
+        let have_above = by > 0;
+        let have_left = bx > 0;
+        let above_mode = if have_above {
+            let bx4 = bx as usize;
+            if bx4 < self.above_mode.len() {
+                self.above_mode[bx4] as usize
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        let left_mode = if have_left {
+            let by4 = (by & 31) as usize;
+            self.left_mode[by4.min(31)] as usize
+        } else {
+            0
+        };
+        let above_ctx = INTRA_MODE_CONTEXT[above_mode.min(12)];
+        let left_ctx = INTRA_MODE_CONTEXT[left_mode.min(12)];
+        (above_ctx, left_ctx)
+    }
 }
 
 impl<'a> TileEncoder<'a> {
@@ -814,17 +1081,64 @@ impl<'a> TileEncoder<'a> {
         let chroma_px_x = px_x / 2;
         let chroma_px_y = px_y / 2;
 
-        let y_pred = self.ctx.dc_prediction(bx, by, bl, 0);
+        let have_above = by > 0;
+        let have_left = bx > 0;
+
+        let above_y: Vec<u8> = (0..8)
+            .map(|i| {
+                let idx = px_x as usize + i;
+                if have_above && idx < self.ctx.above_recon_y.len() {
+                    self.ctx.above_recon_y[idx]
+                } else {
+                    128
+                }
+            })
+            .collect();
+
+        let left_local_py = ((by & 15) * 4) as usize;
+        let left_y: Vec<u8> = (0..8)
+            .map(|i| {
+                let idx = left_local_py + i;
+                if have_left && idx < self.ctx.left_recon_y.len() {
+                    self.ctx.left_recon_y[idx]
+                } else {
+                    128
+                }
+            })
+            .collect();
+
+        let top_left_y = if have_above && have_left {
+            if left_local_py > 0 {
+                self.ctx.left_recon_y[left_local_py - 1]
+            } else if (px_x as usize) > 0 {
+                self.ctx.above_recon_y[px_x as usize - 1]
+            } else {
+                128
+            }
+        } else {
+            128
+        };
+
+        let y_block = extract_block(&self.pixels.y, w, px_x, px_y, 8, w, h);
+
+        let y_mode = select_best_intra_mode(
+            &y_block, &above_y, &left_y, top_left_y,
+            have_above, have_left, 8, 8,
+        );
+        let y_pred_block = generate_prediction(
+            y_mode, &above_y, &left_y, top_left_y,
+            have_above, have_left, 8, 8,
+        );
+
         let u_pred = self.ctx.dc_prediction(bx, by, bl, 1);
         let v_pred = self.ctx.dc_prediction(bx, by, bl, 2);
 
-        let y_block = extract_block(&self.pixels.y, w, px_x, px_y, 8, w, h);
         let u_block = extract_block(&self.pixels.u, cw, chroma_px_x, chroma_px_y, 4, cw, ch);
         let v_block = extract_block(&self.pixels.v, cw, chroma_px_x, chroma_px_y, 4, cw, ch);
 
         let mut y_residual = [0i32; 64];
         for i in 0..64 {
-            y_residual[i] = y_block[i] as i32 - y_pred as i32;
+            y_residual[i] = y_block[i] as i32 - y_pred_block[i] as i32;
         }
         let y_dct = dct::forward_dct_8x8(&y_residual);
         let y_quant = quantize_coeffs(&y_dct, 64, self.dq.dc, self.dq.ac);
@@ -850,13 +1164,18 @@ impl<'a> TileEncoder<'a> {
         let skip_ctx = self.ctx.skip_ctx(bx, by);
         self.enc.encode_bool(is_skip, &mut self.cdf.skip[skip_ctx]);
 
-        self.enc.encode_symbol(0, &mut self.cdf.kf_y_mode[0][0], 12);
+        let (above_mode_ctx, left_mode_ctx) = self.ctx.mode_ctx(bx, by);
+        self.enc.encode_symbol(y_mode as u32, &mut self.cdf.kf_y_mode[above_mode_ctx][left_mode_ctx], 12);
+
+        if (1..=8).contains(&y_mode) {
+            self.enc.encode_symbol(3, &mut self.cdf.angle_delta[(y_mode - 1) as usize], 6);
+        }
 
         let cfl_allowed = bl >= 2;
         let uv_n_syms = if cfl_allowed { 13 } else { 12 };
         let cfl_idx = usize::from(cfl_allowed);
         self.enc
-            .encode_symbol(0, &mut self.cdf.uv_mode[cfl_idx][0], uv_n_syms);
+            .encode_symbol(0, &mut self.cdf.uv_mode[cfl_idx][y_mode as usize], uv_n_syms);
 
         let (y_cul, y_dc_neg, y_dc_zero);
         let (u_cul, u_dc_neg, u_dc_zero);
@@ -875,6 +1194,7 @@ impl<'a> TileEncoder<'a> {
                 1,
                 y_txb_skip_ctx,
                 y_dc_sign_ctx,
+                y_mode,
             );
             y_cul = y_result.0;
             y_dc_neg = y_result.1;
@@ -892,6 +1212,7 @@ impl<'a> TileEncoder<'a> {
                 0,
                 u_txb_skip_ctx,
                 u_dc_sign_ctx,
+                y_mode,
             );
             u_cul = u_result.0;
             u_dc_neg = u_result.1;
@@ -909,6 +1230,7 @@ impl<'a> TileEncoder<'a> {
                 0,
                 v_txb_skip_ctx,
                 v_dc_sign_ctx,
+                y_mode,
             );
             v_cul = v_result.0;
             v_dc_neg = v_result.1;
@@ -935,7 +1257,7 @@ impl<'a> TileEncoder<'a> {
                 let dest_x = px_x + c;
                 let dest_y = px_y + r;
                 if dest_x < w && dest_y < h {
-                    let pixel = (y_pred as i32 + y_recon_residual[(r * 8 + c) as usize]).clamp(0, 255) as u8;
+                    let pixel = (y_pred_block[(r * 8 + c) as usize] as i32 + y_recon_residual[(r * 8 + c) as usize]).clamp(0, 255) as u8;
                     self.recon.y[(dest_y * w + dest_x) as usize] = pixel;
                 }
             }
@@ -1053,6 +1375,7 @@ impl<'a> TileEncoder<'a> {
             .update_partition_ctx(bx, by, bl, self.mi_cols, self.mi_rows);
         self.ctx
             .update_skip_ctx(bx, by, bl, self.mi_cols, self.mi_rows, is_skip);
+        self.ctx.update_mode_ctx(bx, by, bl, self.mi_cols, self.mi_rows, y_mode);
     }
 
     fn skip_mse(&self, bx: u32, by: u32, bl: usize) -> u64 {
@@ -1104,8 +1427,8 @@ impl<'a> TileEncoder<'a> {
         let skip_ctx = self.ctx.skip_ctx(bx, by);
         self.enc.encode_bool(true, &mut self.cdf.skip[skip_ctx]);
 
-        self.enc
-            .encode_symbol(0, &mut self.cdf.kf_y_mode[0][0], 12);
+        let (above_mode_ctx, left_mode_ctx) = self.ctx.mode_ctx(bx, by);
+        self.enc.encode_symbol(0, &mut self.cdf.kf_y_mode[above_mode_ctx][left_mode_ctx], 12);
 
         let cfl_allowed = bl >= 2;
         let uv_n_syms = if cfl_allowed { 13 } else { 12 };
@@ -1169,6 +1492,7 @@ impl<'a> TileEncoder<'a> {
             .update_partition_ctx(bx, by, bl, self.mi_cols, self.mi_rows);
         self.ctx
             .update_skip_ctx(bx, by, bl, self.mi_cols, self.mi_rows, true);
+        self.ctx.update_mode_ctx(bx, by, bl, self.mi_cols, self.mi_rows, 0);
     }
 
     fn encode_partition(&mut self, bl: usize, bx: u32, by: u32) {
@@ -1373,6 +1697,7 @@ impl<'a> InterTileEncoder<'a> {
                 1,
                 y_txb_skip_ctx,
                 y_dc_sign_ctx,
+                0,
             );
             y_cul = y_result.0;
             y_dc_neg = y_result.1;
@@ -1390,6 +1715,7 @@ impl<'a> InterTileEncoder<'a> {
                 0,
                 u_txb_skip_ctx,
                 u_dc_sign_ctx,
+                0,
             );
             u_cul = u_result.0;
             u_dc_neg = u_result.1;
@@ -1407,6 +1733,7 @@ impl<'a> InterTileEncoder<'a> {
                 0,
                 v_txb_skip_ctx,
                 v_dc_sign_ctx,
+                0,
             );
             v_cul = v_result.0;
             v_dc_neg = v_result.1;
@@ -2165,7 +2492,7 @@ mod tests {
         let mut cdf = CdfContext::default();
         let coeffs = vec![0i32; 16];
         let (cul, dc_neg, dc_zero) = encode_transform_block(
-            &mut enc, &mut cdf, &coeffs, &DEFAULT_SCAN_4X4, false, false, 0, 0, 0,
+            &mut enc, &mut cdf, &coeffs, &DEFAULT_SCAN_4X4, false, false, 0, 0, 0, 0,
         );
         assert_eq!(cul, 0);
         assert!(!dc_neg);
@@ -2179,7 +2506,7 @@ mod tests {
         let mut coeffs = vec![0i32; 64];
         coeffs[0] = 2;
         let (cul, dc_neg, dc_zero) = encode_transform_block(
-            &mut enc, &mut cdf, &coeffs, &DEFAULT_SCAN_8X8, false, false, 1, 0, 0,
+            &mut enc, &mut cdf, &coeffs, &DEFAULT_SCAN_8X8, false, false, 1, 0, 0, 0,
         );
         assert!(cul > 0);
         assert!(!dc_neg);
@@ -2195,11 +2522,150 @@ mod tests {
         coeffs[1] = -2;
         coeffs[8] = 1;
         let (cul, _dc_neg, dc_zero) = encode_transform_block(
-            &mut enc, &mut cdf, &coeffs, &DEFAULT_SCAN_8X8, false, false, 1, 0, 0,
+            &mut enc, &mut cdf, &coeffs, &DEFAULT_SCAN_8X8, false, false, 1, 0, 0, 0,
         );
         assert!(cul > 0);
         assert!(!dc_zero);
         let bytes = enc.finalize();
         assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn intra_mode_context_mapping() {
+        assert_eq!(INTRA_MODE_CONTEXT[0], 0);
+        assert_eq!(INTRA_MODE_CONTEXT[1], 1);
+        assert_eq!(INTRA_MODE_CONTEXT[2], 2);
+        assert_eq!(INTRA_MODE_CONTEXT[9], 0);
+        assert_eq!(INTRA_MODE_CONTEXT[10], 1);
+        assert_eq!(INTRA_MODE_CONTEXT[11], 2);
+        assert_eq!(INTRA_MODE_CONTEXT[12], 0);
+    }
+
+    #[test]
+    fn smooth_weights_correct_for_size_4() {
+        assert_eq!(SM_WEIGHTS[4], 255);
+        assert_eq!(SM_WEIGHTS[5], 149);
+        assert_eq!(SM_WEIGHTS[6], 85);
+        assert_eq!(SM_WEIGHTS[7], 64);
+    }
+
+    #[test]
+    fn smooth_weights_correct_for_size_8() {
+        assert_eq!(SM_WEIGHTS[8], 255);
+        assert_eq!(SM_WEIGHTS[9], 197);
+        assert_eq!(SM_WEIGHTS[14], 37);
+        assert_eq!(SM_WEIGHTS[15], 32);
+    }
+
+    #[test]
+    fn v_pred_copies_above_row() {
+        let above = [10u8, 20, 30, 40];
+        let result = predict_v(&above, 4, 4);
+        for r in 0..4 {
+            for c in 0..4 {
+                assert_eq!(result[r * 4 + c], above[c]);
+            }
+        }
+    }
+
+    #[test]
+    fn h_pred_copies_left_column() {
+        let left = [50u8, 60, 70, 80];
+        let result = predict_h(&left, 4, 4);
+        for r in 0..4 {
+            for c in 0..4 {
+                assert_eq!(result[r * 4 + c], left[r]);
+            }
+        }
+    }
+
+    #[test]
+    fn paeth_pred_uniform_neighbors() {
+        let above = [100u8; 8];
+        let left = [100u8; 8];
+        let result = predict_paeth(&above, &left, 100, 8, 8);
+        for &p in &result {
+            assert_eq!(p, 100);
+        }
+    }
+
+    #[test]
+    fn paeth_pred_vertical_edge() {
+        let above = [200u8; 4];
+        let left = [100u8; 4];
+        let result = predict_paeth(&above, &left, 100, 4, 4);
+        for &p in &result {
+            assert_eq!(p, 200);
+        }
+    }
+
+    #[test]
+    fn smooth_pred_corners() {
+        let above = [255u8, 255, 255, 255];
+        let left = [0u8, 0, 0, 0];
+        let result = predict_smooth(&above, &left, 4, 4);
+        assert_eq!(result[0], 128);
+    }
+
+    #[test]
+    fn dc_pred_block_matches_scalar() {
+        let above = [100u8, 120, 140, 160, 100, 120, 140, 160];
+        let left = [80u8, 90, 100, 110, 80, 90, 100, 110];
+        let result = predict_dc(&above, &left, true, true, 8, 8);
+        let expected = {
+            let sum: u32 = above.iter().chain(left.iter()).map(|&x| x as u32).sum();
+            ((sum + 8) / 16) as u8
+        };
+        for &p in &result {
+            assert_eq!(p, expected);
+        }
+    }
+
+    #[test]
+    fn mode_selection_picks_dc_for_solid() {
+        let above = [128u8; 8];
+        let left = [128u8; 8];
+        let block = [128u8; 64];
+        let mode = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8);
+        assert_eq!(mode, 0);
+    }
+
+    #[test]
+    fn mode_selection_picks_v_for_vertical_pattern() {
+        let above = [10u8, 20, 30, 40, 50, 60, 70, 80];
+        let left = [128u8; 8];
+        let mut block = [0u8; 64];
+        for r in 0..8 {
+            for c in 0..8 {
+                block[r * 8 + c] = above[c];
+            }
+        }
+        let mode = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8);
+        assert_eq!(mode, 1);
+    }
+
+    #[test]
+    fn mode_selection_picks_h_for_horizontal_pattern() {
+        let above = [128u8; 8];
+        let left = [10u8, 20, 30, 40, 50, 60, 70, 80];
+        let mut block = [0u8; 64];
+        for r in 0..8 {
+            for c in 0..8 {
+                block[r * 8 + c] = left[r];
+            }
+        }
+        let mode = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8);
+        assert_eq!(mode, 2);
+    }
+
+    #[test]
+    fn mode_context_initialized_to_dc() {
+        let ctx = TileContext::new(16);
+        for &m in &ctx.above_mode {
+            assert_eq!(m, 0);
+        }
+        for &m in &ctx.left_mode {
+            assert_eq!(m, 0);
+        }
     }
 }
