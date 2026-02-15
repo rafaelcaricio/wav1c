@@ -9,9 +9,9 @@ An AV1 video encoder written from scratch in safe Rust with zero dependencies. P
 ## Features
 
 - YUV 4:2:0 encoding (8-bit)
-- Intra prediction (DC mode) with per-pixel reconstructed context
+- Intra prediction (DC, V, H, Smooth, Paeth) with RD-cost mode selection
 - Inter prediction (GLOBALMV with LAST_FRAME reference)
-- Forward DCT transforms (4x4 chroma, 8x8 luma)
+- Forward DCT/ADST transforms with RD-cost type selection (4x4 chroma, 8x8/16x16 luma)
 - MSAC arithmetic coding with full coefficient encoding
 - GoP structure (keyframe + inter frames)
 - Arbitrary frame dimensions up to 4096x2304
@@ -25,6 +25,7 @@ An AV1 video encoder written from scratch in safe Rust with zero dependencies. P
 wav1c/          Core library with batch and streaming APIs
 wav1c-cli/      Command-line encoder
 wav1c-ffi/      C FFI shared library (cdylib + staticlib)
+wav1c-wasm/     WebAssembly bindings (wasm-bindgen)
 ```
 
 ## Build
@@ -98,7 +99,7 @@ The `wav1c-ffi` crate produces `libwav1c_ffi.dylib` (macOS) / `libwav1c_ffi.so` 
 Wav1cConfig cfg = { .base_q_idx = 128, .keyint = 25, .fps = 25.0 };
 Wav1cEncoder *enc = wav1c_encoder_new(320, 240, &cfg);
 
-wav1c_encoder_send_frame(enc, y, y_len, u, u_len, v, v_len);
+wav1c_encoder_send_frame(enc, y, y_len, u, u_len, v, v_len, width, width / 2);
 Wav1cPacket *pkt = wav1c_encoder_receive_packet(enc);
 // pkt->data, pkt->size contain raw AV1 OBUs
 
@@ -132,7 +133,7 @@ git apply /path/to/wav1c/ffmpeg-libwav1c.patch
   --extra-cflags="-I/path/to/wav1c/wav1c-ffi/include" \
   --extra-ldflags="-L/path/to/wav1c/target/release"
 
-make -j$(nproc)
+make -j$(sysctl -n hw.ncpu 2>/dev/null || nproc)
 
 # Encode
 ./ffmpeg -i input.y4m -c:v libwav1c -wav1c-q 128 output.mp4
