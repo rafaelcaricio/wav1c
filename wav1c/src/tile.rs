@@ -786,6 +786,8 @@ struct TileContext {
     left_intra: [bool; 32],
     above_mode: Vec<u8>,
     left_mode: [u8; 32],
+    above_newmv: Vec<bool>,
+    left_newmv: [bool; 32],
 }
 
 impl TileContext {
@@ -819,6 +821,8 @@ impl TileContext {
             left_intra: [false; 32],
             above_mode: vec![0u8; mi_cols as usize + 32],
             left_mode: [0u8; 32],
+            above_newmv: vec![false; above_inter_size],
+            left_newmv: [false; 32],
         }
     }
 
@@ -832,6 +836,7 @@ impl TileContext {
         self.left_ccoef = [[0x40u8; 16]; 2];
         self.left_intra = [false; 32];
         self.left_mode = [0u8; 32];
+        self.left_newmv = [false; 32];
     }
 
     fn partition_ctx(&self, bx: u32, by: u32, bl: usize) -> usize {
@@ -1168,6 +1173,20 @@ impl TileContext {
         }
     }
 
+    fn has_inter_neighbor(&self, bx: u32, by: u32) -> bool {
+        let bx4 = bx as usize;
+        let by4 = (by & 31) as usize;
+        let have_top = by > 0;
+        let have_left = bx > 0;
+
+        let above_inter = have_top
+            && bx4 < self.above_intra.len()
+            && !self.above_intra[bx4];
+        let left_inter = have_left && !self.left_intra[by4.min(31)];
+
+        above_inter || left_inter
+    }
+
     fn newmv_ctx(&self, bx: u32, by: u32) -> usize {
         let bx4 = bx as usize;
         let by4 = (by & 31) as usize;
@@ -1179,11 +1198,17 @@ impl TileContext {
             && !self.above_intra[bx4];
         let left_inter = have_left && !self.left_intra[by4.min(31)];
 
+        let above_is_newmv = above_inter
+            && bx4 < self.above_newmv.len()
+            && self.above_newmv[bx4];
+        let left_is_newmv = left_inter && self.left_newmv[by4.min(31)];
+        let have_newmv = (above_is_newmv || left_is_newmv) as u32;
+
         let nearest_match = above_inter as u32 + left_inter as u32;
         match nearest_match {
             0 => 0,
-            1 => 3,
-            2 => 5,
+            1 => (3 - have_newmv) as usize,
+            2 => (5 - have_newmv) as usize,
             _ => unreachable!(),
         }
     }
@@ -1241,6 +1266,32 @@ impl TileContext {
         for i in 0..lh {
             if by4 + i < 32 {
                 self.left_intra[by4 + i] = is_intra;
+            }
+        }
+    }
+
+    fn update_newmv_flag(
+        &mut self,
+        bx: u32,
+        by: u32,
+        bl: usize,
+        mi_cols: u32,
+        mi_rows: u32,
+        is_newmv: bool,
+    ) {
+        let bx4 = bx as usize;
+        let by4 = (by & 31) as usize;
+        let bw4 = 2 * (16usize >> bl);
+        let aw = min(bw4, (mi_cols - bx) as usize);
+        let lh = min(bw4, (mi_rows - by) as usize);
+        for i in 0..aw {
+            if bx4 + i < self.above_newmv.len() {
+                self.above_newmv[bx4 + i] = is_newmv;
+            }
+        }
+        for i in 0..lh {
+            if by4 + i < 32 {
+                self.left_newmv[by4 + i] = is_newmv;
             }
         }
     }
@@ -1842,6 +1893,7 @@ struct InterTileEncoder<'a> {
     reference: &'a FramePixels,
     dq: DequantValues,
     recon: FramePixels,
+    block_mvs: Vec<BlockMv>,
 }
 
 impl<'a> InterTileEncoder<'a> {
@@ -1868,6 +1920,7 @@ impl<'a> InterTileEncoder<'a> {
                 u: vec![128u8; (cw * ch) as usize],
                 v: vec![128u8; (cw * ch) as usize],
             },
+            block_mvs: vec![BlockMv::default(); (mi_cols * mi_rows) as usize],
         }
     }
 
@@ -1885,9 +1938,54 @@ impl<'a> InterTileEncoder<'a> {
         let u_src = extract_block(&self.pixels.u, cw, chroma_px_x, chroma_px_y, 4, cw, ch);
         let v_src = extract_block(&self.pixels.v, cw, chroma_px_x, chroma_px_y, 4, cw, ch);
 
-        let y_ref_block = extract_block(&self.reference.y, w, px_x, px_y, 8, w, h);
-        let u_ref_block = extract_block(&self.reference.u, cw, chroma_px_x, chroma_px_y, 4, cw, ch);
-        let v_ref_block = extract_block(&self.reference.v, cw, chroma_px_x, chroma_px_y, 4, cw, ch);
+        let (dx_pixels, dy_pixels) = motion_search_block(
+            &self.pixels.y, &self.reference.y, w, h, px_x, px_y, 8,
+        );
+
+        let (pred_x, pred_y, mv_candidates) = predict_mv(
+            &self.block_mvs, self.mi_cols, self.mi_rows, bx, by,
+        );
+
+        let zero_y_ref = extract_block(&self.reference.y, w, px_x, px_y, 8, w, h);
+        let zero_u_ref = extract_block(&self.reference.u, cw, chroma_px_x, chroma_px_y, 4, cw, ch);
+        let zero_v_ref = extract_block(&self.reference.v, cw, chroma_px_x, chroma_px_y, 4, cw, ch);
+
+        let no_inter_neighbors = !self.ctx.has_inter_neighbor(bx, by);
+
+        let use_newmv = if no_inter_neighbors && (dx_pixels != 0 || dy_pixels != 0) {
+            let ref_px_x = (px_x as i32 + dx_pixels) as u32;
+            let ref_px_y = (px_y as i32 + dy_pixels) as u32;
+            let mc_y_ref = extract_block(&self.reference.y, w, ref_px_x, ref_px_y, 8, w, h);
+
+            let mut zero_energy = 0i64;
+            let mut mc_energy = 0i64;
+            for i in 0..64 {
+                let zd = y_src[i] as i64 - zero_y_ref[i] as i64;
+                let md = y_src[i] as i64 - mc_y_ref[i] as i64;
+                zero_energy += zd * zd;
+                mc_energy += md * md;
+            }
+
+            mc_energy < zero_energy
+        } else {
+            false
+        };
+
+        let (y_ref_block, u_ref_block, v_ref_block) = if use_newmv {
+            let ref_px_x = (px_x as i32 + dx_pixels) as u32;
+            let ref_px_y = (px_y as i32 + dy_pixels) as u32;
+            let chroma_dx = dx_pixels / 2;
+            let chroma_dy = dy_pixels / 2;
+            let chroma_ref_x = (chroma_px_x as i32 + chroma_dx) as u32;
+            let chroma_ref_y = (chroma_px_y as i32 + chroma_dy) as u32;
+            (
+                extract_block(&self.reference.y, w, ref_px_x, ref_px_y, 8, w, h),
+                extract_block(&self.reference.u, cw, chroma_ref_x, chroma_ref_y, 4, cw, ch),
+                extract_block(&self.reference.v, cw, chroma_ref_x, chroma_ref_y, 4, cw, ch),
+            )
+        } else {
+            (zero_y_ref, zero_u_ref, zero_v_ref)
+        };
 
         let mut y_residual = [0i32; 64];
         for i in 0..64 {
@@ -1930,11 +2028,26 @@ impl<'a> InterTileEncoder<'a> {
             .encode_bool(false, &mut self.cdf.single_ref[ref_ctx][3]);
 
         let newmv_ctx = self.ctx.newmv_ctx(bx, by);
-        self.enc.encode_bool(true, &mut self.cdf.newmv[newmv_ctx]);
 
-        let zeromv_ctx = 0usize;
-        self.enc
-            .encode_bool(false, &mut self.cdf.zeromv[zeromv_ctx]);
+        if use_newmv {
+            self.enc.encode_bool(false, &mut self.cdf.newmv[newmv_ctx]);
+
+            if mv_candidates.len() > 1 {
+                let drl_ctx = get_drl_context(&mv_candidates, 0);
+                self.enc.encode_bool(false, &mut self.cdf.drl[drl_ctx]);
+            }
+
+            let mv_x = dx_pixels * 8;
+            let mv_y = dy_pixels * 8;
+            let diff_x = mv_x - pred_x;
+            let diff_y = mv_y - pred_y;
+            encode_mv_residual(&mut self.enc, &mut self.cdf.mv, diff_y, diff_x);
+        } else {
+            self.enc.encode_bool(true, &mut self.cdf.newmv[newmv_ctx]);
+            let zeromv_ctx = 0usize;
+            self.enc
+                .encode_bool(false, &mut self.cdf.zeromv[zeromv_ctx]);
+        }
 
         let (y_cul, y_dc_neg, y_dc_zero);
         let (u_cul, u_dc_neg, u_dc_zero);
@@ -2108,6 +2221,17 @@ impl<'a> InterTileEncoder<'a> {
             }
         }
 
+        let stored_mv = BlockMv {
+            mv_x: if use_newmv { dx_pixels * 8 } else { 0 },
+            mv_y: if use_newmv { dy_pixels * 8 } else { 0 },
+            ref_frame: 0,
+        };
+        for row in by..by.saturating_add(2).min(self.mi_rows) {
+            for col in bx..bx.saturating_add(2).min(self.mi_cols) {
+                self.block_mvs[(row * self.mi_cols + col) as usize] = stored_mv;
+            }
+        }
+
         self.ctx.update_recon(
             bx,
             by,
@@ -2139,6 +2263,8 @@ impl<'a> InterTileEncoder<'a> {
             .update_skip_ctx(bx, by, bl, self.mi_cols, self.mi_rows, is_skip);
         self.ctx
             .update_intra_ctx(bx, by, bl, self.mi_cols, self.mi_rows, false);
+        self.ctx
+            .update_newmv_flag(bx, by, bl, self.mi_cols, self.mi_rows, use_newmv);
     }
 
     fn inter_skip_mse(&self, bx: u32, by: u32, bl: usize) -> u64 {
@@ -2290,6 +2416,20 @@ impl<'a> InterTileEncoder<'a> {
             .update_skip_ctx(bx, by, bl, self.mi_cols, self.mi_rows, true);
         self.ctx
             .update_intra_ctx(bx, by, bl, self.mi_cols, self.mi_rows, false);
+        self.ctx
+            .update_newmv_flag(bx, by, bl, self.mi_cols, self.mi_rows, false);
+
+        let stored_mv = BlockMv {
+            mv_x: 0,
+            mv_y: 0,
+            ref_frame: 0,
+        };
+        let mi_per_side = 2u32 << (4 - bl);
+        for row in by..by.saturating_add(mi_per_side).min(self.mi_rows) {
+            for col in bx..bx.saturating_add(mi_per_side).min(self.mi_cols) {
+                self.block_mvs[(row * self.mi_cols + col) as usize] = stored_mv;
+            }
+        }
     }
 
     fn encode_inter_partition(&mut self, bl: usize, bx: u32, by: u32) {
@@ -2379,6 +2519,229 @@ pub fn encode_inter_tile_with_recon(
 
     let tile_bytes = tile.enc.finalize();
     (tile_bytes, tile.recon)
+}
+
+fn decompose_mv_diff(diff: u32) -> (u32, u32, u32) {
+    let raw = diff - 1;
+    let fp = (raw >> 1) & 3;
+    let up = raw >> 3;
+    if up < 2 {
+        (0, up, fp)
+    } else {
+        let class = 31 - up.leading_zeros();
+        (class, up, fp)
+    }
+}
+
+fn encode_mv_component(
+    enc: &mut MsacEncoder,
+    comp_cdf: &mut crate::cdf::MvComponentCdf,
+    value: i32,
+) {
+    let sign = value < 0;
+    let abs_val = value.unsigned_abs();
+    let (cl, up, fp) = decompose_mv_diff(abs_val);
+
+    enc.encode_bool(sign, &mut comp_cdf.sign);
+    enc.encode_symbol(cl, &mut comp_cdf.classes, 10);
+
+    if cl == 0 {
+        enc.encode_bool(up != 0, &mut comp_cdf.class0);
+        enc.encode_symbol(fp, &mut comp_cdf.class0_fp[up as usize], 3);
+    } else {
+        for n in 0..cl {
+            let bit = (up >> n) & 1;
+            enc.encode_bool(bit != 0, &mut comp_cdf.classN[n as usize]);
+        }
+        enc.encode_symbol(fp, &mut comp_cdf.classN_fp, 3);
+    }
+}
+
+fn encode_mv_residual(
+    enc: &mut MsacEncoder,
+    mv_cdf: &mut crate::cdf::MvCdf,
+    dy: i32,
+    dx: i32,
+) {
+    let joint = match (dy != 0, dx != 0) {
+        (false, false) => 0,
+        (false, true) => 1,
+        (true, false) => 2,
+        (true, true) => 3,
+    };
+
+    enc.encode_symbol(joint, &mut mv_cdf.joint, 3);
+
+    if dy != 0 {
+        encode_mv_component(enc, &mut mv_cdf.comp[0], dy);
+    }
+    if dx != 0 {
+        encode_mv_component(enc, &mut mv_cdf.comp[1], dx);
+    }
+}
+
+fn motion_search_block(
+    source: &[u8],
+    reference: &[u8],
+    width: u32,
+    height: u32,
+    px_x: u32,
+    px_y: u32,
+    block_size: u32,
+) -> (i32, i32) {
+    if px_x + block_size > width || px_y + block_size > height {
+        return (0, 0);
+    }
+
+    let mut best_dx: i32 = 0;
+    let mut best_dy: i32 = 0;
+    let mut best_sad: u32 = u32::MAX;
+    let mut best_cost: i32 = 0;
+
+    for dy in -16i32..=16 {
+        for dx in -16i32..=16 {
+            let ref_x = px_x as i32 + dx;
+            let ref_y = px_y as i32 + dy;
+
+            if ref_x < 0
+                || ref_y < 0
+                || ref_x + block_size as i32 > width as i32
+                || ref_y + block_size as i32 > height as i32
+            {
+                continue;
+            }
+
+            let mut sad: u32 = 0;
+            for row in 0..block_size {
+                let src_off = ((px_y + row) * width + px_x) as usize;
+                let ref_off = ((ref_y as u32 + row) * width + ref_x as u32) as usize;
+                for col in 0..block_size as usize {
+                    let s = source[src_off + col] as i32;
+                    let r = reference[ref_off + col] as i32;
+                    sad += (s - r).unsigned_abs();
+                }
+            }
+
+            let cost = dx.abs() + dy.abs();
+
+            if sad < best_sad || (sad == best_sad && cost < best_cost) {
+                best_sad = sad;
+                best_dx = dx;
+                best_dy = dy;
+                best_cost = cost;
+            }
+        }
+    }
+
+    (best_dx, best_dy)
+}
+
+#[derive(Clone, Copy)]
+struct BlockMv {
+    mv_x: i32,
+    mv_y: i32,
+    ref_frame: i8,
+}
+
+impl Default for BlockMv {
+    fn default() -> Self {
+        Self {
+            mv_x: 0,
+            mv_y: 0,
+            ref_frame: -1,
+        }
+    }
+}
+
+struct MvCandidate {
+    mv_x: i32,
+    mv_y: i32,
+    weight: u32,
+}
+
+fn add_candidate(candidates: &mut Vec<MvCandidate>, mv_x: i32, mv_y: i32, weight: u32) {
+    for c in candidates.iter_mut() {
+        if c.mv_x == mv_x && c.mv_y == mv_y {
+            c.weight += weight;
+            return;
+        }
+    }
+    candidates.push(MvCandidate { mv_x, mv_y, weight });
+}
+
+fn predict_mv(
+    block_mvs: &[BlockMv],
+    mi_cols: u32,
+    mi_rows: u32,
+    bx4: u32,
+    by4: u32,
+) -> (i32, i32, Vec<MvCandidate>) {
+    let mut candidates: Vec<MvCandidate> = Vec::new();
+
+    if by4 > 0 {
+        for col in bx4..bx4.saturating_add(2).min(mi_cols) {
+            let idx = ((by4 - 1) * mi_cols + col) as usize;
+            if idx < block_mvs.len() {
+                let b = &block_mvs[idx];
+                if b.ref_frame == 0 {
+                    add_candidate(&mut candidates, b.mv_x, b.mv_y, 2);
+                }
+            }
+        }
+    }
+
+    if bx4 > 0 {
+        for row in by4..by4.saturating_add(2).min(mi_rows) {
+            let idx = (row * mi_cols + bx4 - 1) as usize;
+            if idx < block_mvs.len() {
+                let b = &block_mvs[idx];
+                if b.ref_frame == 0 {
+                    add_candidate(&mut candidates, b.mv_x, b.mv_y, 2);
+                }
+            }
+        }
+    }
+
+    if by4 > 0 && bx4 + 2 < mi_cols {
+        let idx = ((by4 - 1) * mi_cols + bx4 + 2) as usize;
+        if idx < block_mvs.len() {
+            let b = &block_mvs[idx];
+            if b.ref_frame == 0 {
+                add_candidate(&mut candidates, b.mv_x, b.mv_y, 2);
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        return (0, 0, candidates);
+    }
+
+    for c in &mut candidates {
+        c.weight += 640;
+    }
+
+    candidates.sort_by(|a, b| b.weight.cmp(&a.weight));
+
+    (candidates[0].mv_x, candidates[0].mv_y, candidates)
+}
+
+fn get_drl_context(candidates: &[MvCandidate], ref_idx: usize) -> usize {
+    if candidates.len() <= ref_idx + 1 {
+        return 2;
+    }
+    let cur_weight = candidates[ref_idx].weight;
+    let next_weight = candidates[ref_idx + 1].weight;
+    if cur_weight >= 640 {
+        if next_weight < 640 {
+            1
+        } else {
+            0
+        }
+    } else if next_weight < 640 {
+        2
+    } else {
+        0
+    }
 }
 
 #[cfg(test)]
@@ -2704,6 +3067,30 @@ mod tests {
         let mut ctx = TileContext::new(64);
         ctx.above_intra[16] = true;
         assert_eq!(ctx.newmv_ctx(16, 16), 3);
+    }
+
+    #[test]
+    fn newmv_ctx_neighbor_used_newmv_one_side() {
+        let mut ctx = TileContext::new(64);
+        ctx.above_newmv[16] = true;
+        assert_eq!(ctx.newmv_ctx(16, 16), 4);
+    }
+
+    #[test]
+    fn newmv_ctx_neighbor_used_newmv_both_sides() {
+        let mut ctx = TileContext::new(64);
+        ctx.above_newmv[16] = true;
+        ctx.left_newmv[16] = true;
+        assert_eq!(ctx.newmv_ctx(16, 16), 4);
+    }
+
+    #[test]
+    fn newmv_ctx_neighbor_used_newmv_left_only() {
+        let mut ctx = TileContext::new(32);
+        ctx.above_intra[16] = false;
+        ctx.left_intra[0] = false;
+        ctx.left_newmv[0] = true;
+        assert_eq!(ctx.newmv_ctx(16, 0), 2);
     }
 
     #[test]
@@ -3114,5 +3501,123 @@ mod tests {
         }
         let bytes = encode_tile(&pixels);
         assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn mv_diff_decompose_one_pixel() {
+        let (cl, up, fp) = decompose_mv_diff(8);
+        assert_eq!((cl, up, fp), (0, 0, 3));
+    }
+
+    #[test]
+    fn mv_diff_decompose_two_pixels() {
+        let (cl, up, fp) = decompose_mv_diff(16);
+        assert_eq!((cl, up, fp), (0, 1, 3));
+    }
+
+    #[test]
+    fn mv_diff_decompose_three_pixels() {
+        let (cl, up, fp) = decompose_mv_diff(24);
+        assert_eq!((cl, up, fp), (1, 2, 3));
+    }
+
+    #[test]
+    fn mv_diff_roundtrip() {
+        for diff in (2u32..=128).step_by(2) {
+            let (cl, up, fp) = decompose_mv_diff(diff);
+            let _ = cl;
+            let reconstructed = ((up << 3) | (fp << 1) | 1) + 1;
+            assert_eq!(reconstructed, diff, "diff={diff}");
+        }
+    }
+
+    #[test]
+    fn motion_search_finds_shifted_block() {
+        let mut reference = vec![128u8; 64 * 64];
+        for r in 10..18 {
+            for c in 14..22 {
+                reference[r * 64 + c] = 200;
+            }
+        }
+        let mut source = vec![128u8; 64 * 64];
+        for r in 10..18 {
+            for c in 10..18 {
+                source[r * 64 + c] = 200;
+            }
+        }
+        let (dx, dy) = motion_search_block(
+            &source, &reference, 64, 64, 10, 10, 8,
+        );
+        assert_eq!((dx, dy), (4, 0));
+    }
+
+    #[test]
+    fn motion_search_zero_when_same() {
+        let reference = vec![200u8; 64 * 64];
+        let source = vec![200u8; 64 * 64];
+        let (dx, dy) = motion_search_block(
+            &source, &reference, 64, 64, 10, 10, 8,
+        );
+        assert_eq!((dx, dy), (0, 0));
+    }
+
+    #[test]
+    fn mv_prediction_no_neighbors() {
+        let mi_cols = 10u32;
+        let mi_rows = 10u32;
+        let block_mvs = vec![BlockMv::default(); (mi_cols * mi_rows) as usize];
+        let (px, py, cands) = predict_mv(&block_mvs, mi_cols, mi_rows, 0, 0);
+        assert_eq!((px, py), (0, 0));
+        assert!(cands.is_empty());
+    }
+
+    #[test]
+    fn mv_prediction_from_left_neighbor() {
+        let mi_cols = 10u32;
+        let mi_rows = 10u32;
+        let mut block_mvs = vec![BlockMv::default(); (mi_cols * mi_rows) as usize];
+        for row in 2..4u32 {
+            for col in 0..2u32 {
+                let idx = (row * mi_cols + col) as usize;
+                block_mvs[idx] = BlockMv { mv_x: 16, mv_y: 8, ref_frame: 0 };
+            }
+        }
+        let (px, py, _) = predict_mv(&block_mvs, mi_cols, mi_rows, 2, 2);
+        assert_eq!((px, py), (16, 8));
+    }
+
+    #[test]
+    fn mv_prediction_from_above_neighbor() {
+        let mi_cols = 10u32;
+        let mi_rows = 10u32;
+        let mut block_mvs = vec![BlockMv::default(); (mi_cols * mi_rows) as usize];
+        for row in 0..2u32 {
+            for col in 2..4u32 {
+                let idx = (row * mi_cols + col) as usize;
+                block_mvs[idx] = BlockMv { mv_x: 24, mv_y: -16, ref_frame: 0 };
+            }
+        }
+        let (px, py, _) = predict_mv(&block_mvs, mi_cols, mi_rows, 2, 2);
+        assert_eq!((px, py), (24, -16));
+    }
+
+    #[test]
+    fn drl_context_computation() {
+        let cands = vec![
+            MvCandidate { mv_x: 8, mv_y: 0, weight: 644 },
+            MvCandidate { mv_x: 16, mv_y: 0, weight: 642 },
+        ];
+        assert_eq!(get_drl_context(&cands, 0), 0);
+
+        let cands2 = vec![
+            MvCandidate { mv_x: 8, mv_y: 0, weight: 644 },
+            MvCandidate { mv_x: 16, mv_y: 0, weight: 4 },
+        ];
+        assert_eq!(get_drl_context(&cands2, 0), 1);
+
+        let single = vec![
+            MvCandidate { mv_x: 8, mv_y: 0, weight: 644 },
+        ];
+        assert_eq!(get_drl_context(&single, 0), 2);
     }
 }

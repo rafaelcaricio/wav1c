@@ -179,7 +179,7 @@ fn fwd_adst8_1d(data: &mut [i32], offset: usize, stride: usize) {
     let in3 = data[offset + 2 * stride];
     let in4 = data[offset + 3 * stride];
     let in5 = data[offset + 4 * stride];
-    let in6 = data[offset + 1 * stride];
+    let in6 = data[offset + stride];
     let in7 = data[offset + 6 * stride];
 
     let t0a = (((4076 - 4096) * in0 + 401 * in1 + 2048) >> 12) + in0;
