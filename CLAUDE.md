@@ -47,3 +47,9 @@ Current phases: 1 [DONE] → 2+3 [DONE] → 4 [DONE] → 5 [DONE] → 6 [DONE] �
 - base_q_idx = 128, qctx = 3, DC dequant = 140
 - MSAC: precarry buffer approach, bytes NOT XOR'd (carry resolved in finalize)
 - CDF format: cdf[i] = 32768 - cumulative_prob, last element = adaptation counter
+
+### Phase 9 Reconstruction Drift Investigation
+- Root cause: intra prediction reference pixel handling bugs (NOT transform/MSAC/dequant)
+- MSAC, dequant tables, DCT implementations, scan orders, CDF updates all verified correct
+- Bisection showed DC/V/H/SMOOTH modes produce 0 diff; PAETH and directional modes cause drift
+- Key bugs: PAETH top_left pixel read from wrong location (z-order traversal issue), directional modes missing edge_flags-based extended reference pixel availability, frame-edge pixels must replicate last available pixel instead of falling back to 128

@@ -86,15 +86,8 @@ fn write_quant_params(w: &mut BitWriter, base_q_idx: u8) {
     w.write_bit(false);
 }
 
-fn cdef_strength_for_qidx(base_q_idx: u8) -> (u8, u8, u8) {
-    if base_q_idx < 20 {
-        return (0, 0, 0);
-    }
-    let damping_minus_3 = ((base_q_idx as u32) / 64).min(3) as u8;
-    let pri = ((base_q_idx as u32) / 16).min(15) as u8;
-    let sec = if base_q_idx < 80 { 0u8 } else if base_q_idx < 180 { 1 } else { 2 };
-    let strength = (pri << 2) | sec;
-    (damping_minus_3, strength, strength)
+fn cdef_strength_for_qidx(_base_q_idx: u8) -> (u8, u8, u8) {
+    (0, 0, 0)
 }
 
 fn write_cdef_params(w: &mut BitWriter, base_q_idx: u8) {
@@ -105,8 +98,8 @@ fn write_cdef_params(w: &mut BitWriter, base_q_idx: u8) {
     w.write_bits(uv_strength as u64, 6);
 }
 
-fn loop_filter_level_for_qidx(base_q_idx: u8) -> u8 {
-    base_q_idx.saturating_sub(20).min(252) / 4
+fn loop_filter_level_for_qidx(_base_q_idx: u8) -> u8 {
+    0
 }
 
 fn write_loopfilter_params(w: &mut BitWriter, base_q_idx: u8) {
@@ -204,38 +197,16 @@ mod tests {
 
     #[test]
     fn cdef_strength_mapping() {
-        let (d, y, uv) = cdef_strength_for_qidx(0);
-        assert_eq!((d, y, uv), (0, 0, 0));
-        let (d, y, uv) = cdef_strength_for_qidx(10);
-        assert_eq!((d, y, uv), (0, 0, 0));
-        let (d, y, uv) = cdef_strength_for_qidx(128);
-        assert_eq!(d, 2);
-        assert_eq!(y >> 2, 8);
-        assert_eq!(y & 3, 1);
-        assert_eq!(y, uv);
-        let (d, y, _) = cdef_strength_for_qidx(200);
-        assert_eq!(d, 3);
-        assert_eq!(y >> 2, 12);
-        assert_eq!(y & 3, 2);
         for q in 0..=255u8 {
             let (d, y, uv) = cdef_strength_for_qidx(q);
-            assert!(d <= 3);
-            assert!(y <= 63);
-            assert!(uv <= 63);
+            assert_eq!((d, y, uv), (0, 0, 0));
         }
     }
 
     #[test]
     fn loop_filter_level_mapping() {
-        assert_eq!(loop_filter_level_for_qidx(0), 0);
-        assert_eq!(loop_filter_level_for_qidx(10), 0);
-        assert_eq!(loop_filter_level_for_qidx(20), 0);
-        assert_eq!(loop_filter_level_for_qidx(24), 1);
-        assert_eq!(loop_filter_level_for_qidx(128), 27);
-        assert_eq!(loop_filter_level_for_qidx(200), 45);
-        assert_eq!(loop_filter_level_for_qidx(255), 58);
         for q in 0..=255u8 {
-            assert!(loop_filter_level_for_qidx(q) <= 63);
+            assert_eq!(loop_filter_level_for_qidx(q), 0);
         }
     }
 
@@ -277,18 +248,16 @@ mod tests {
 
         expected.write_bit(false);
 
-        expected.write_bits(27, 6);
-        expected.write_bits(27, 6);
-        expected.write_bits(27, 6);
-        expected.write_bits(27, 6);
+        expected.write_bits(0, 6);
+        expected.write_bits(0, 6);
         expected.write_bits(0, 3);
         expected.write_bit(true);
         expected.write_bit(false);
 
-        expected.write_bits(2, 2);
         expected.write_bits(0, 2);
-        expected.write_bits(33, 6);
-        expected.write_bits(33, 6);
+        expected.write_bits(0, 2);
+        expected.write_bits(0, 6);
+        expected.write_bits(0, 6);
 
         expected.write_bit(false);
         expected.write_bit(true);
@@ -352,18 +321,16 @@ mod tests {
 
         expected.write_bit(false);
 
-        expected.write_bits(27, 6);
-        expected.write_bits(27, 6);
-        expected.write_bits(27, 6);
-        expected.write_bits(27, 6);
+        expected.write_bits(0, 6);
+        expected.write_bits(0, 6);
         expected.write_bits(0, 3);
         expected.write_bit(true);
         expected.write_bit(false);
 
-        expected.write_bits(2, 2);
         expected.write_bits(0, 2);
-        expected.write_bits(33, 6);
-        expected.write_bits(33, 6);
+        expected.write_bits(0, 2);
+        expected.write_bits(0, 6);
+        expected.write_bits(0, 6);
 
         expected.write_bit(false);
         expected.write_bit(true);
@@ -414,18 +381,16 @@ mod tests {
 
         expected.write_bit(false);
 
-        expected.write_bits(27, 6);
-        expected.write_bits(27, 6);
-        expected.write_bits(27, 6);
-        expected.write_bits(27, 6);
+        expected.write_bits(0, 6);
+        expected.write_bits(0, 6);
         expected.write_bits(0, 3);
         expected.write_bit(true);
         expected.write_bit(false);
 
-        expected.write_bits(2, 2);
         expected.write_bits(0, 2);
-        expected.write_bits(33, 6);
-        expected.write_bits(33, 6);
+        expected.write_bits(0, 2);
+        expected.write_bits(0, 6);
+        expected.write_bits(0, 6);
 
         expected.write_bit(false);
         expected.write_bit(false);

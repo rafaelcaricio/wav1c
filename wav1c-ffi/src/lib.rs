@@ -1,3 +1,5 @@
+#![allow(clippy::missing_safety_doc)]
+
 use std::ptr;
 
 use wav1c::packet::FrameType;
@@ -88,21 +90,60 @@ pub unsafe extern "C" fn wav1c_encoder_send_frame(
     u_len: usize,
     v: *const u8,
     v_len: usize,
+    y_stride: i32,
+    uv_stride: i32,
 ) -> i32 {
     if enc.is_null() || y.is_null() || u.is_null() || v.is_null() {
         return -1;
     }
 
     let enc = unsafe { &mut *enc };
+    let width = enc.inner.width() as usize;
+    let height = enc.inner.height() as usize;
+    let uv_w = width.div_ceil(2);
+    let uv_h = height.div_ceil(2);
+    let y_stride = if y_stride > 0 { y_stride as usize } else { width };
+    let uv_stride = if uv_stride > 0 { uv_stride as usize } else { uv_w };
 
-    let frame = unsafe {
-        FramePixels {
-            y: std::slice::from_raw_parts(y, y_len).to_vec(),
-            u: std::slice::from_raw_parts(u, u_len).to_vec(),
-            v: std::slice::from_raw_parts(v, v_len).to_vec(),
-            width: enc.inner.width(),
-            height: enc.inner.height(),
+    let y_plane = if y_stride == width {
+        unsafe { std::slice::from_raw_parts(y, y_len) }.to_vec()
+    } else {
+        let mut packed = Vec::with_capacity(width * height);
+        for row in 0..height {
+            let src = unsafe { y.add(row * y_stride) };
+            packed.extend_from_slice(unsafe { std::slice::from_raw_parts(src, width) });
         }
+        packed
+    };
+
+    let u_plane = if uv_stride == uv_w {
+        unsafe { std::slice::from_raw_parts(u, u_len) }.to_vec()
+    } else {
+        let mut packed = Vec::with_capacity(uv_w * uv_h);
+        for row in 0..uv_h {
+            let src = unsafe { u.add(row * uv_stride) };
+            packed.extend_from_slice(unsafe { std::slice::from_raw_parts(src, uv_w) });
+        }
+        packed
+    };
+
+    let v_plane = if uv_stride == uv_w {
+        unsafe { std::slice::from_raw_parts(v, v_len) }.to_vec()
+    } else {
+        let mut packed = Vec::with_capacity(uv_w * uv_h);
+        for row in 0..uv_h {
+            let src = unsafe { v.add(row * uv_stride) };
+            packed.extend_from_slice(unsafe { std::slice::from_raw_parts(src, uv_w) });
+        }
+        packed
+    };
+
+    let frame = FramePixels {
+        y: y_plane,
+        u: u_plane,
+        v: v_plane,
+        width: width as u32,
+        height: height as u32,
     };
 
     match enc.inner.send_frame(&frame) {
