@@ -431,6 +431,131 @@ fn y4m_various_dimensions() {
 }
 
 #[test]
+fn recon_matches_dav1d_for_complex_content() {
+    let Some(dav1d) = dav1d_path() else {
+        return;
+    };
+
+    let y4m_data = create_test_y4m(320, 240, |col, row| {
+        let y = ((row % 256) as u8).wrapping_add((col % 64) as u8).wrapping_mul(3);
+        let u = (col * 256 / 320) as u8;
+        let v = (row * 256 / 240) as u8;
+        (y, u, v)
+    });
+    let pixels = FramePixels::from_y4m(&y4m_data);
+
+    let q = 50u8;
+    let dq = wav1c::dequant::lookup_dequant(q);
+    let (frame_data, encoder_recon) = wav1c::frame::encode_frame_with_recon(&pixels, q, dq);
+
+    let encoder_y_mse: f64 = pixels.y.iter().zip(encoder_recon.y.iter())
+        .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
+        .sum::<f64>() / pixels.y.len() as f64;
+    let encoder_y_psnr = if encoder_y_mse == 0.0 { f64::INFINITY } else { 10.0 * (255.0_f64.powi(2) / encoder_y_mse).log10() };
+
+    let ivf_data = {
+        let mut out = Vec::new();
+        wav1c::ivf::write_ivf_header(&mut out, 320, 240, 1).unwrap();
+        let mut pkt = Vec::new();
+        pkt.extend_from_slice(&wav1c::obu::obu_wrap(wav1c::obu::ObuType::TemporalDelimiter, &[]));
+        pkt.extend_from_slice(&wav1c::obu::obu_wrap(wav1c::obu::ObuType::SequenceHeader, &wav1c::sequence::encode_sequence_header(320, 240)));
+        pkt.extend_from_slice(&wav1c::obu::obu_wrap(wav1c::obu::ObuType::Frame, &frame_data));
+        wav1c::ivf::write_ivf_frame(&mut out, 0, &pkt).unwrap();
+        out
+    };
+
+    let (success, stderr, dav1d_y4m) = decode_to_y4m(&dav1d, &ivf_data, "recon_check");
+    assert!(success, "dav1d failed: {}", stderr);
+
+    let (dav1d_y, _, _) = extract_y4m_planes(&dav1d_y4m, 320, 240);
+
+    let dav1d_y_mse: f64 = pixels.y.iter().zip(dav1d_y.iter())
+        .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
+        .sum::<f64>() / pixels.y.len() as f64;
+    let dav1d_y_psnr = if dav1d_y_mse == 0.0 { f64::INFINITY } else { 10.0 * (255.0_f64.powi(2) / dav1d_y_mse).log10() };
+
+    let recon_vs_dav1d_mse: f64 = encoder_recon.y.iter().zip(dav1d_y.iter())
+        .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
+        .sum::<f64>() / encoder_recon.y.len() as f64;
+    let recon_vs_dav1d_psnr = if recon_vs_dav1d_mse == 0.0 { f64::INFINITY } else { 10.0 * (255.0_f64.powi(2) / recon_vs_dav1d_mse).log10() };
+
+    let max_recon_diff: i32 = encoder_recon.y.iter().zip(dav1d_y.iter())
+        .map(|(&a, &b)| (a as i32 - b as i32).abs())
+        .max().unwrap();
+
+    eprintln!("QP={q}: encoder_recon_psnr={encoder_y_psnr:.2} dav1d_psnr={dav1d_y_psnr:.2} recon_vs_dav1d={recon_vs_dav1d_psnr:.2} max_recon_diff={max_recon_diff}");
+
+    assert!(max_recon_diff <= 1, "Reconstruction drift detected: max pixel diff between encoder recon and dav1d = {max_recon_diff}");
+}
+
+#[test]
+fn debug_per_block_drift() {
+    let Some(dav1d) = dav1d_path() else {
+        return;
+    };
+
+    let w = 64u32;
+    let h = 64u32;
+    let y4m_data = create_test_y4m(w, h, |col, row| {
+        let y = ((row % 256) as u8).wrapping_add((col % 64) as u8).wrapping_mul(3);
+        let u = (col * 256 / w) as u8;
+        let v = (row * 256 / h) as u8;
+        (y, u, v)
+    });
+    let pixels = FramePixels::from_y4m(&y4m_data);
+
+    let q = 50u8;
+    let dq = wav1c::dequant::lookup_dequant(q);
+    let (frame_data, encoder_recon) = wav1c::frame::encode_frame_with_recon(&pixels, q, dq);
+
+    let ivf_data = {
+        let mut out = Vec::new();
+        wav1c::ivf::write_ivf_header(&mut out, w as u16, h as u16, 1).unwrap();
+        let mut pkt = Vec::new();
+        pkt.extend_from_slice(&wav1c::obu::obu_wrap(wav1c::obu::ObuType::TemporalDelimiter, &[]));
+        pkt.extend_from_slice(&wav1c::obu::obu_wrap(wav1c::obu::ObuType::SequenceHeader, &wav1c::sequence::encode_sequence_header(w, h)));
+        pkt.extend_from_slice(&wav1c::obu::obu_wrap(wav1c::obu::ObuType::Frame, &frame_data));
+        wav1c::ivf::write_ivf_frame(&mut out, 0, &pkt).unwrap();
+        out
+    };
+
+    let (success, stderr, dav1d_y4m) = decode_to_y4m(&dav1d, &ivf_data, "debug_drift");
+    assert!(success, "dav1d failed: {}", stderr);
+    let (dav1d_y, _, _) = extract_y4m_planes(&dav1d_y4m, w, h);
+
+    eprintln!("\n=== Per 8x8 block max diff (encoder recon vs dav1d) ===");
+    let stride = w as usize;
+    for by in (0..h as usize).step_by(8) {
+        for bx in (0..w as usize).step_by(8) {
+            let mut max_diff = 0i32;
+            for r in 0..8 {
+                for c in 0..8 {
+                    let y_pos = (by + r) * stride + (bx + c);
+                    if y_pos < encoder_recon.y.len() && y_pos < dav1d_y.len() {
+                        let d = (encoder_recon.y[y_pos] as i32 - dav1d_y[y_pos] as i32).abs();
+                        max_diff = max_diff.max(d);
+                    }
+                }
+            }
+            if max_diff > 0 {
+                eprint!("[{},{}]={:3} ", bx/8, by/8, max_diff);
+            }
+        }
+    }
+    eprintln!();
+
+    let total_max: i32 = encoder_recon.y.iter().zip(dav1d_y.iter())
+        .map(|(&a, &b)| (a as i32 - b as i32).abs())
+        .max().unwrap();
+    eprintln!("Total max Y diff: {total_max}");
+
+    let first_block_max: i32 = (0..8).flat_map(|r| (0..8).map(move |c| r * stride + c))
+        .map(|pos| (encoder_recon.y[pos] as i32 - dav1d_y[pos] as i32).abs())
+        .max().unwrap();
+    eprintln!("First 8x8 block max diff: {first_block_max}");
+}
+
+#[test]
 fn dav1d_decodes_gradient_multi_sb() {
     let Some(dav1d) = dav1d_path() else {
         return;
