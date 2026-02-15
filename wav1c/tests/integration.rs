@@ -11,12 +11,12 @@ fn dav1d_path() -> Option<std::path::PathBuf> {
         }
     }
 
-    if let Ok(output) = Command::new("which").arg("dav1d").output() {
-        if output.status.success() {
-            let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !p.is_empty() {
-                return Some(std::path::PathBuf::from(p));
-            }
+    if let Ok(output) = Command::new("which").arg("dav1d").output()
+        && output.status.success()
+    {
+        let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !p.is_empty() {
+            return Some(std::path::PathBuf::from(p));
         }
     }
 
@@ -409,8 +409,8 @@ fn y4m_various_dimensions() {
     for &(w, h) in dimensions {
         let y4m_data = create_test_y4m(w, h, |col, row| {
             let y = ((row % 256) as u8).wrapping_add((col % 64) as u8).wrapping_mul(3);
-            let u = ((col * 256 / w) as u8).min(255);
-            let v = ((row * 256 / h) as u8).min(255);
+            let u = (col * 256 / w) as u8;
+            let v = (row * 256 / h) as u8;
             (y, u, v)
         });
         let pixels = FramePixels::from_y4m(&y4m_data);

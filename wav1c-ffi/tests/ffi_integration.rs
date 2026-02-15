@@ -15,12 +15,12 @@ fn dav1d_path() -> Option<std::path::PathBuf> {
         }
     }
 
-    if let Ok(output) = Command::new("which").arg("dav1d").output() {
-        if output.status.success() {
-            let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !p.is_empty() {
-                return Some(std::path::PathBuf::from(p));
-            }
+    if let Ok(output) = Command::new("which").arg("dav1d").output()
+        && output.status.success()
+    {
+        let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !p.is_empty() {
+            return Some(std::path::PathBuf::from(p));
         }
     }
 
