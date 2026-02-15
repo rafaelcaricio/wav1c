@@ -2255,25 +2255,49 @@ impl<'a> TileEncoder<'a> {
         let px_x = bx * 4;
         let px_y = by * 4;
         let block_size = 1u32 << (7 - bl);
+        let chroma_size = block_size / 2;
         let w = self.pixels.width;
         let h = self.pixels.height;
+        let cw = w.div_ceil(2);
+        let ch = h.div_ceil(2);
+        let cpx = px_x / 2;
+        let cpy = px_y / 2;
 
         let y_pred = self.ctx.dc_prediction(bx, by, bl, 0) as i64;
+        let u_pred = self.ctx.dc_prediction(bx, by, bl, 1) as i64;
+        let v_pred = self.ctx.dc_prediction(bx, by, bl, 2) as i64;
 
-        let mut sse = 0u64;
-        let mut count = 0u64;
+        let mut y_sse = 0u64;
+        let mut y_count = 0u64;
         for r in 0..block_size {
             for c in 0..block_size {
                 let sy = min(px_y + r, h - 1);
                 let sx = min(px_x + c, w - 1);
                 let val = self.pixels.y[(sy * w + sx) as usize] as i64;
                 let diff = val - y_pred;
-                sse += (diff * diff) as u64;
-                count += 1;
+                y_sse += (diff * diff) as u64;
+                y_count += 1;
             }
         }
 
-        sse / count.max(1)
+        let mut uv_sse = 0u64;
+        let mut uv_count = 0u64;
+        for r in 0..chroma_size {
+            for c in 0..chroma_size {
+                let sy = min(cpy + r, ch - 1);
+                let sx = min(cpx + c, cw - 1);
+                let u_val = self.pixels.u[(sy * cw + sx) as usize] as i64;
+                let v_val = self.pixels.v[(sy * cw + sx) as usize] as i64;
+                let u_diff = u_val - u_pred;
+                let v_diff = v_val - v_pred;
+                uv_sse += (u_diff * u_diff + v_diff * v_diff) as u64;
+                uv_count += 1;
+            }
+        }
+
+        let y_mse = y_sse / y_count.max(1);
+        let uv_mse = uv_sse / uv_count.max(1);
+        y_mse + 8 * uv_mse
     }
 
     fn should_use_partition_none(&self, bx: u32, by: u32, bl: usize) -> bool {
