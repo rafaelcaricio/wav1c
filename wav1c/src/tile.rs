@@ -81,6 +81,44 @@ const TXTP_INTRA2_MAP: [dct::TxType; 5] = [
     dct::TxType::DctAdst,
 ];
 
+#[rustfmt::skip]
+const SUBPEL_FILTER_8TAP: [[i8; 8]; 15] = [
+    [  0,  1, -3, 63,  4, -1,  0,  0],
+    [  0,  1, -5, 61,  9, -2,  0,  0],
+    [  0,  1, -6, 58, 14, -4,  1,  0],
+    [  0,  1, -7, 55, 19, -5,  1,  0],
+    [  0,  1, -7, 51, 24, -6,  1,  0],
+    [  0,  1, -8, 47, 29, -6,  1,  0],
+    [  0,  1, -7, 42, 33, -6,  1,  0],
+    [  0,  1, -7, 38, 38, -7,  1,  0],
+    [  0,  1, -6, 33, 42, -7,  1,  0],
+    [  0,  1, -6, 29, 47, -8,  1,  0],
+    [  0,  1, -6, 24, 51, -7,  1,  0],
+    [  0,  1, -5, 19, 55, -7,  1,  0],
+    [  0,  1, -4, 14, 58, -6,  1,  0],
+    [  0,  0, -2,  9, 61, -5,  1,  0],
+    [  0,  0, -1,  4, 63, -3,  1,  0],
+];
+
+#[rustfmt::skip]
+const SUBPEL_FILTER_4TAP: [[i8; 8]; 15] = [
+    [  0,  0, -2, 63,  4, -1,  0,  0],
+    [  0,  0, -4, 61,  9, -2,  0,  0],
+    [  0,  0, -5, 58, 14, -3,  0,  0],
+    [  0,  0, -6, 55, 19, -4,  0,  0],
+    [  0,  0, -6, 51, 24, -5,  0,  0],
+    [  0,  0, -7, 47, 29, -5,  0,  0],
+    [  0,  0, -6, 42, 33, -5,  0,  0],
+    [  0,  0, -6, 38, 38, -6,  0,  0],
+    [  0,  0, -5, 33, 42, -6,  0,  0],
+    [  0,  0, -5, 29, 47, -7,  0,  0],
+    [  0,  0, -5, 24, 51, -6,  0,  0],
+    [  0,  0, -4, 19, 55, -6,  0,  0],
+    [  0,  0, -3, 14, 58, -5,  0,  0],
+    [  0,  0, -2,  9, 61, -4,  0,  0],
+    [  0,  0, -1,  4, 63, -2,  0,  0],
+];
+
 fn txtype_to_intra2_symbol(tx: dct::TxType) -> u32 {
     match tx {
         dct::TxType::Idtx => 0,
@@ -754,6 +792,164 @@ fn extract_block(
         }
     }
     block
+}
+
+#[allow(clippy::too_many_arguments)]
+fn interpolate_block(
+    reference: &[u8],
+    width: u32,
+    height: u32,
+    int_x: i32,
+    int_y: i32,
+    phase_x: u32,
+    phase_y: u32,
+    block_size: u32,
+) -> Vec<u8> {
+    let bs = block_size as usize;
+    let w = width as i32;
+    let h = height as i32;
+    let mut output = vec![0u8; bs * bs];
+
+    let mx = phase_x * 2;
+    let my = phase_y * 2;
+    let filter_table = if block_size > 4 {
+        &SUBPEL_FILTER_8TAP
+    } else {
+        &SUBPEL_FILTER_4TAP
+    };
+
+    let ref_pixel = |sx: i32, sy: i32| -> i32 {
+        let cx = sx.clamp(0, w - 1) as u32;
+        let cy = sy.clamp(0, h - 1) as u32;
+        reference[(cy * width + cx) as usize] as i32
+    };
+
+    if mx == 0 && my == 0 {
+        for r in 0..bs {
+            for c in 0..bs {
+                output[r * bs + c] = ref_pixel(int_x + c as i32, int_y + r as i32) as u8;
+            }
+        }
+    } else if mx != 0 && my == 0 {
+        let fh = &filter_table[(mx - 1) as usize];
+        for r in 0..bs {
+            let sy = int_y + r as i32;
+            for c in 0..bs {
+                let mut sum = 0i32;
+                for t in 0..8i32 {
+                    sum += fh[t as usize] as i32 * ref_pixel(int_x + c as i32 + t - 3, sy);
+                }
+                output[r * bs + c] = ((sum + 34) >> 6).clamp(0, 255) as u8;
+            }
+        }
+    } else if mx == 0 {
+        let fv = &filter_table[(my - 1) as usize];
+        for r in 0..bs {
+            for c in 0..bs {
+                let sx = int_x + c as i32;
+                let mut sum = 0i32;
+                for t in 0..8i32 {
+                    sum += fv[t as usize] as i32 * ref_pixel(sx, int_y + r as i32 + t - 3);
+                }
+                output[r * bs + c] = ((sum + 32) >> 6).clamp(0, 255) as u8;
+            }
+        }
+    } else {
+        let fh = &filter_table[(mx - 1) as usize];
+        let fv = &filter_table[(my - 1) as usize];
+        let mid_rows = bs + 7;
+        let mut mid = vec![0i16; mid_rows * bs];
+
+        for r in 0..mid_rows {
+            let sy = int_y + r as i32 - 3;
+            for c in 0..bs {
+                let mut sum = 0i32;
+                for t in 0..8i32 {
+                    sum += fh[t as usize] as i32 * ref_pixel(int_x + c as i32 + t - 3, sy);
+                }
+                mid[r * bs + c] = ((sum + 2) >> 2) as i16;
+            }
+        }
+
+        for r in 0..bs {
+            for c in 0..bs {
+                let mut sum = 0i32;
+                for t in 0..8 {
+                    sum += fv[t] as i32 * mid[(r + t) * bs + c] as i32;
+                }
+                output[r * bs + c] = ((sum + 512) >> 10).clamp(0, 255) as u8;
+            }
+        }
+    }
+
+    output
+}
+
+fn compute_block_sad(source: &[u8], predicted: &[u8]) -> u32 {
+    source
+        .iter()
+        .zip(predicted.iter())
+        .map(|(&s, &p)| (s as i32 - p as i32).unsigned_abs())
+        .sum()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn subpel_refine(
+    source: &[u8],
+    reference: &[u8],
+    width: u32,
+    height: u32,
+    px_x: u32,
+    px_y: u32,
+    block_size: u32,
+    best_mv_x: i32,
+    best_mv_y: i32,
+) -> (i32, i32) {
+    let bs = block_size as usize;
+    let src_block: Vec<u8> = {
+        let mut b = vec![0u8; bs * bs];
+        for r in 0..bs {
+            for c in 0..bs {
+                let sy = min(px_y + r as u32, height - 1);
+                let sx = min(px_x + c as u32, width - 1);
+                b[r * bs + c] = source[(sy * width + sx) as usize];
+            }
+        }
+        b
+    };
+
+    let eval = |mv_x: i32, mv_y: i32| -> u32 {
+        let int_x = px_x as i32 + (mv_x >> 3);
+        let int_y = px_y as i32 + (mv_y >> 3);
+        let phase_x = (mv_x & 7) as u32;
+        let phase_y = (mv_y & 7) as u32;
+        let pred = interpolate_block(reference, width, height, int_x, int_y, phase_x, phase_y, block_size);
+        compute_block_sad(&src_block, &pred)
+    };
+
+    let mut bx = best_mv_x;
+    let mut by = best_mv_y;
+    let mut best_sad = eval(bx, by);
+
+    for &step in &[4i32, 2] {
+        for &(dx, dy) in &[
+            (-step, 0), (step, 0), (0, -step), (0, step),
+            (-step, -step), (-step, step), (step, -step), (step, step),
+        ] {
+            let cx = bx + dx;
+            let cy = by + dy;
+            let sad = eval(cx, cy);
+            let new_cost = cx.abs() + cy.abs();
+            let old_cost = bx.abs() + by.abs();
+            if sad < best_sad || (sad == best_sad && new_cost < old_cost) {
+                best_sad = sad;
+                bx = cx;
+                by = cy;
+            }
+        }
+    }
+
+    (bx, by)
 }
 
 struct TileEncoder<'a> {
@@ -1942,6 +2138,15 @@ impl<'a> InterTileEncoder<'a> {
             &self.pixels.y, &self.reference.y, w, h, px_x, px_y, 8,
         );
 
+        let (refined_mv_x, refined_mv_y) = if dx_pixels != 0 || dy_pixels != 0 {
+            subpel_refine(
+                &self.pixels.y, &self.reference.y, w, h, px_x, px_y, 8,
+                dx_pixels * 8, dy_pixels * 8,
+            )
+        } else {
+            (0, 0)
+        };
+
         let (pred_x, pred_y, mv_candidates) = predict_mv(
             &self.block_mvs, self.mi_cols, self.mi_rows, bx, by,
         );
@@ -1952,10 +2157,14 @@ impl<'a> InterTileEncoder<'a> {
 
         let no_inter_neighbors = !self.ctx.has_inter_neighbor(bx, by);
 
-        let use_newmv = if no_inter_neighbors && (dx_pixels != 0 || dy_pixels != 0) {
-            let ref_px_x = (px_x as i32 + dx_pixels) as u32;
-            let ref_px_y = (px_y as i32 + dy_pixels) as u32;
-            let mc_y_ref = extract_block(&self.reference.y, w, ref_px_x, ref_px_y, 8, w, h);
+        let use_newmv = if no_inter_neighbors && (refined_mv_x != 0 || refined_mv_y != 0) {
+            let y_int_x = px_x as i32 + (refined_mv_x >> 3);
+            let y_int_y = px_y as i32 + (refined_mv_y >> 3);
+            let y_phase_x = (refined_mv_x & 7) as u32;
+            let y_phase_y = (refined_mv_y & 7) as u32;
+            let mc_y_ref = interpolate_block(
+                &self.reference.y, w, h, y_int_x, y_int_y, y_phase_x, y_phase_y, 8,
+            );
 
             let mut zero_energy = 0i64;
             let mut mc_energy = 0i64;
@@ -1971,20 +2180,28 @@ impl<'a> InterTileEncoder<'a> {
             false
         };
 
-        let (y_ref_block, u_ref_block, v_ref_block) = if use_newmv {
-            let ref_px_x = (px_x as i32 + dx_pixels) as u32;
-            let ref_px_y = (px_y as i32 + dy_pixels) as u32;
-            let chroma_dx = dx_pixels / 2;
-            let chroma_dy = dy_pixels / 2;
-            let chroma_ref_x = (chroma_px_x as i32 + chroma_dx) as u32;
-            let chroma_ref_y = (chroma_px_y as i32 + chroma_dy) as u32;
+        let (y_ref_block, u_ref_block, v_ref_block, final_mv_x, final_mv_y) = if use_newmv {
+            let y_int_x = px_x as i32 + (refined_mv_x >> 3);
+            let y_int_y = px_y as i32 + (refined_mv_y >> 3);
+            let y_phase_x = (refined_mv_x & 7) as u32;
+            let y_phase_y = (refined_mv_y & 7) as u32;
+
+            let chroma_mv_x = refined_mv_x / 2;
+            let chroma_mv_y = refined_mv_y / 2;
+            let c_int_x = chroma_px_x as i32 + (chroma_mv_x >> 3);
+            let c_int_y = chroma_px_y as i32 + (chroma_mv_y >> 3);
+            let c_phase_x = (chroma_mv_x & 7) as u32;
+            let c_phase_y = (chroma_mv_y & 7) as u32;
+
             (
-                extract_block(&self.reference.y, w, ref_px_x, ref_px_y, 8, w, h),
-                extract_block(&self.reference.u, cw, chroma_ref_x, chroma_ref_y, 4, cw, ch),
-                extract_block(&self.reference.v, cw, chroma_ref_x, chroma_ref_y, 4, cw, ch),
+                interpolate_block(&self.reference.y, w, h, y_int_x, y_int_y, y_phase_x, y_phase_y, 8),
+                interpolate_block(&self.reference.u, cw, ch, c_int_x, c_int_y, c_phase_x, c_phase_y, 4),
+                interpolate_block(&self.reference.v, cw, ch, c_int_x, c_int_y, c_phase_x, c_phase_y, 4),
+                refined_mv_x,
+                refined_mv_y,
             )
         } else {
-            (zero_y_ref, zero_u_ref, zero_v_ref)
+            (zero_y_ref, zero_u_ref, zero_v_ref, 0, 0)
         };
 
         let mut y_residual = [0i32; 64];
@@ -2037,10 +2254,8 @@ impl<'a> InterTileEncoder<'a> {
                 self.enc.encode_bool(false, &mut self.cdf.drl[drl_ctx]);
             }
 
-            let mv_x = dx_pixels * 8;
-            let mv_y = dy_pixels * 8;
-            let diff_x = mv_x - pred_x;
-            let diff_y = mv_y - pred_y;
+            let diff_x = final_mv_x - pred_x;
+            let diff_y = final_mv_y - pred_y;
             encode_mv_residual(&mut self.enc, &mut self.cdf.mv, diff_y, diff_x);
         } else {
             self.enc.encode_bool(true, &mut self.cdf.newmv[newmv_ctx]);
@@ -2222,8 +2437,8 @@ impl<'a> InterTileEncoder<'a> {
         }
 
         let stored_mv = BlockMv {
-            mv_x: if use_newmv { dx_pixels * 8 } else { 0 },
-            mv_y: if use_newmv { dy_pixels * 8 } else { 0 },
+            mv_x: final_mv_x,
+            mv_y: final_mv_y,
             ref_frame: 0,
         };
         for row in by..by.saturating_add(2).min(self.mi_rows) {
