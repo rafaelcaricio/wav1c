@@ -223,26 +223,6 @@ pub const DEFAULT_EOB_BIN_64_CDF: [[[u16; 8]; 2]; 2] =
     ];
 
 #[rustfmt::skip]
-pub const DEFAULT_EOB_BIN_256_CDF: [[[u16; 16]; 2]; 2] =
-[
-        [
-            [27420, 25655, 20948, 16844, 10662, 5991, 2434, 1011, 0, 0, 0, 0, 0, 0, 0, 0],
-            [30315, 28294, 26461, 23991, 16294, 9793, 3768, 1221, 0, 0, 0, 0, 0, 0, 0, 0],
-        ],
-        [
-            [9658, 8171, 5628, 3874, 2601, 1841, 1376, 674, 0, 0, 0, 0, 0, 0, 0, 0],
-            [22770, 15107, 7590, 4671, 1460, 730, 365, 73, 0, 0, 0, 0, 0, 0, 0, 0],
-        ],
-    ];
-
-#[rustfmt::skip]
-pub const DEFAULT_EOB_BIN_1024_CDF: [[u16; 16]; 2] =
-[
-        [26070, 24434, 20807, 17006, 12582, 8906, 5334, 3442, 1686, 718, 0, 0, 0, 0, 0, 0],
-        [12199, 10342, 7199, 5909, 4715, 3855, 3282, 3044, 2961, 198, 0, 0, 0, 0, 0, 0],
-    ];
-
-#[rustfmt::skip]
 pub const DEFAULT_EOB_BASE_TOK_CDF: [[[[u16; 4]; 4]; 2]; 5] =
 [
         [
@@ -1232,8 +1212,8 @@ impl CdfContext {
             txb_skip: *coef.txb_skip,
             eob_bin_16: *coef.eob_bin_16,
             eob_bin_64: *coef.eob_bin_64,
-            eob_bin_256: DEFAULT_EOB_BIN_256_CDF,
-            eob_bin_1024: DEFAULT_EOB_BIN_1024_CDF,
+            eob_bin_256: *coef.eob_bin_256,
+            eob_bin_1024: *coef.eob_bin_1024,
             eob_base_tok: *coef.eob_base_tok,
             br_tok: *coef.br_tok,
             eob_hi_bit: *coef.eob_hi_bit,
