@@ -1099,6 +1099,62 @@ pub const DEFAULT_DC_SIGN_CDF: [[[u16; 4]; 3]; 2] =
         ],
     ];
 
+#[derive(Clone)]
+#[allow(non_snake_case)]
+pub struct MvComponentCdf {
+    pub sign: [u16; 4],
+    pub classes: [u16; 16],
+    pub class0: [u16; 4],
+    pub class0_fp: [[u16; 8]; 2],
+    pub classN: [[u16; 4]; 10],
+    pub classN_fp: [u16; 8],
+}
+
+#[derive(Clone)]
+pub struct MvCdf {
+    pub joint: [u16; 8],
+    pub comp: [MvComponentCdf; 2],
+}
+
+impl MvCdf {
+    #[rustfmt::skip]
+    pub fn default_cdfs() -> Self {
+        let comp = MvComponentCdf {
+            sign: [16384, 0, 0, 0],
+            classes: [4096, 1792, 910, 448, 217, 112, 28, 11, 6, 1, 0, 0, 0, 0, 0, 0],
+            class0: [5120, 0, 0, 0],
+            class0_fp: [
+                [16384, 8192, 6144, 0, 0, 0, 0, 0],
+                [20480, 11520, 8640, 0, 0, 0, 0, 0],
+            ],
+            classN: [
+                [15360, 0, 0, 0],
+                [14848, 0, 0, 0],
+                [13824, 0, 0, 0],
+                [12288, 0, 0, 0],
+                [10240, 0, 0, 0],
+                [8192, 0, 0, 0],
+                [4096, 0, 0, 0],
+                [2816, 0, 0, 0],
+                [2816, 0, 0, 0],
+                [2048, 0, 0, 0],
+            ],
+            classN_fp: [24576, 15360, 11520, 0, 0, 0, 0, 0],
+        };
+        Self {
+            joint: [28672, 21504, 13440, 0, 0, 0, 0, 0],
+            comp: [comp.clone(), comp],
+        }
+    }
+}
+
+#[rustfmt::skip]
+pub const DEFAULT_DRL_CDF: [[u16; 4]; 3] = [
+    [19664, 0, 0, 0],
+    [8208, 0, 0, 0],
+    [13823, 0, 0, 0],
+];
+
 #[rustfmt::skip]
 pub const DEFAULT_IS_INTER_CDF: [[u16; 4]; 4] = [
     [31962, 0, 0, 0],
@@ -1161,6 +1217,8 @@ pub struct CdfContext {
     pub txtp_intra2: [[[u16; 8]; 13]; 3],
     pub txtp_inter: [u16; 4],
     pub angle_delta: [[u16; 8]; 8],
+    pub mv: MvCdf,
+    pub drl: [[u16; 4]; 3],
 }
 
 impl CdfContext {
@@ -1197,6 +1255,8 @@ impl CdfContext {
                 [30528, 21672, 17315, 12427, 10207, 3851, 0, 0],
                 [29163, 22340, 20309, 15092, 11524, 2113, 0, 0],
             ],
+            mv: MvCdf::default_cdfs(),
+            drl: DEFAULT_DRL_CDF,
         }
     }
 }
