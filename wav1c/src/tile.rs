@@ -2409,7 +2409,17 @@ impl<'a> TileEncoder<'a> {
 
         if have_h_split && have_v_split {
             let part_ctx = self.ctx.partition_ctx(bx, by, bl);
-            if bl < 3 {
+            if bl == 1 {
+                self.enc.encode_symbol(
+                    3,
+                    &mut self.cdf.partition[bl][part_ctx],
+                    PARTITION_NSYMS[bl],
+                );
+                self.encode_partition(bl + 1, bx, by);
+                self.encode_partition(bl + 1, bx + hsz, by);
+                self.encode_partition(bl + 1, bx, by + hsz);
+                self.encode_partition(bl + 1, bx + hsz, by + hsz);
+            } else if bl == 2 {
                 if self.should_use_partition_none(bx, by, bl) {
                     self.enc.encode_symbol(
                         0,

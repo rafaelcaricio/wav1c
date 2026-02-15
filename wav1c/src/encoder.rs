@@ -91,6 +91,10 @@ impl Encoder {
         let dq = dequant::lookup_dequant(base_q_idx);
 
         let td = obu::obu_wrap(obu::ObuType::TemporalDelimiter, &[]);
+        let seq = obu::obu_wrap(
+            obu::ObuType::SequenceHeader,
+            &sequence::encode_sequence_header(self.width, self.height),
+        );
 
         let (frame_payload, recon) = if is_keyframe {
             frame::encode_frame_with_recon(pixels, base_q_idx, dq)
@@ -115,13 +119,7 @@ impl Encoder {
 
         let mut data = Vec::new();
         data.extend_from_slice(&td);
-        if is_keyframe {
-            let seq = obu::obu_wrap(
-                obu::ObuType::SequenceHeader,
-                &sequence::encode_sequence_header(self.width, self.height),
-            );
-            data.extend_from_slice(&seq);
-        }
+        data.extend_from_slice(&seq);
         data.extend_from_slice(&frm);
 
         let frame_type = if is_keyframe {
