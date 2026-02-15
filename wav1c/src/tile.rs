@@ -401,40 +401,41 @@ fn predict_directional_z2(
     out
 }
 
+const MODE_TO_ANGLE: [i32; 8] = [90, 180, 45, 135, 113, 157, 203, 67];
+
+#[allow(clippy::too_many_arguments)]
+fn generate_directional_prediction(
+    angle: i32, above: &[u8], left: &[u8], top_left: u8,
+    have_above: bool, have_left: bool, w: usize, h: usize,
+) -> Vec<u8> {
+    if angle <= 90 {
+        if angle < 90 && have_above {
+            let dx = DR_INTRA_DERIVATIVE[(angle / 2) as usize] as i32;
+            predict_directional_z1(above, w, h, dx)
+        } else {
+            predict_v(above, w, h)
+        }
+    } else if angle < 180 {
+        let dx = DR_INTRA_DERIVATIVE[((180 - angle) / 2) as usize] as i32;
+        let dy = DR_INTRA_DERIVATIVE[((angle - 90) / 2) as usize] as i32;
+        predict_directional_z2(above, left, top_left, w, h, dx, dy)
+    } else if angle > 180 && have_left {
+        let dy = DR_INTRA_DERIVATIVE[((270 - angle) / 2) as usize] as i32;
+        predict_directional_z3(left, w, h, dy)
+    } else {
+        predict_h(left, w, h)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn generate_prediction(
-    mode: u8, above: &[u8], left: &[u8], top_left: u8,
+    mode: u8, delta: i8, above: &[u8], left: &[u8], top_left: u8,
     have_above: bool, have_left: bool, w: usize, h: usize,
 ) -> Vec<u8> {
     match mode {
-        1 => predict_v(above, w, h),
-        2 => predict_h(left, w, h),
-        3 => {
-            let dx = DR_INTRA_DERIVATIVE[22] as i32;
-            predict_directional_z1(above, w, h, dx)
-        }
-        4 => {
-            let dx = DR_INTRA_DERIVATIVE[22] as i32;
-            let dy = DR_INTRA_DERIVATIVE[22] as i32;
-            predict_directional_z2(above, left, top_left, w, h, dx, dy)
-        }
-        5 => {
-            let dx = DR_INTRA_DERIVATIVE[33] as i32;
-            let dy = DR_INTRA_DERIVATIVE[11] as i32;
-            predict_directional_z2(above, left, top_left, w, h, dx, dy)
-        }
-        6 => {
-            let dx = DR_INTRA_DERIVATIVE[11] as i32;
-            let dy = DR_INTRA_DERIVATIVE[33] as i32;
-            predict_directional_z2(above, left, top_left, w, h, dx, dy)
-        }
-        7 => {
-            let dy = DR_INTRA_DERIVATIVE[33] as i32;
-            predict_directional_z3(left, w, h, dy)
-        }
-        8 => {
-            let dx = DR_INTRA_DERIVATIVE[33] as i32;
-            predict_directional_z1(above, w, h, dx)
+        1..=8 => {
+            let angle = MODE_TO_ANGLE[(mode - 1) as usize] + 3 * delta as i32;
+            generate_directional_prediction(angle, above, left, top_left, have_above, have_left, w, h)
         }
         9 => predict_smooth(above, left, w, h),
         10 => predict_smooth_v(above, left, w, h),
@@ -489,9 +490,10 @@ fn select_best_intra_mode(
     h: usize,
     dc_dq: u32,
     ac_dq: u32,
-) -> u8 {
+) -> (u8, i8) {
     let dc = predict_dc(above, left, have_above, have_left, w, h);
     let mut best_mode = 0u8;
+    let mut best_delta = 0i8;
     let mut best_cost = compute_rd_cost(source, &dc, dc_dq, ac_dq, dct::TxType::DctDct);
 
     if have_above {
@@ -500,6 +502,7 @@ fn select_best_intra_mode(
         if cost < best_cost {
             best_cost = cost;
             best_mode = 1;
+            best_delta = 0;
         }
     }
 
@@ -509,6 +512,7 @@ fn select_best_intra_mode(
         if cost < best_cost {
             best_cost = cost;
             best_mode = 2;
+            best_delta = 0;
         }
     }
 
@@ -518,6 +522,7 @@ fn select_best_intra_mode(
         if cost < best_cost {
             best_cost = cost;
             best_mode = 9;
+            best_delta = 0;
         }
 
         let sv = predict_smooth_v(above, left, w, h);
@@ -525,6 +530,7 @@ fn select_best_intra_mode(
         if cost < best_cost {
             best_cost = cost;
             best_mode = 10;
+            best_delta = 0;
         }
 
         let sh = predict_smooth_h(above, left, w, h);
@@ -532,6 +538,7 @@ fn select_best_intra_mode(
         if cost < best_cost {
             best_cost = cost;
             best_mode = 11;
+            best_delta = 0;
         }
 
         let paeth = predict_paeth(above, left, top_left, w, h);
@@ -539,19 +546,26 @@ fn select_best_intra_mode(
         if cost < best_cost {
             best_cost = cost;
             best_mode = 12;
+            best_delta = 0;
         }
 
-        for mode in 3..=8u8 {
-            let pred = generate_prediction(mode, above, left, top_left, true, true, w, h);
-            let cost = compute_rd_cost(source, &pred, dc_dq, ac_dq, dct::TxType::DctDct);
-            if cost < best_cost {
-                best_cost = cost;
-                best_mode = mode;
+        for mode in 1..=8u8 {
+            for delta in -3..=3i8 {
+                if delta == 0 && (mode == 1 || mode == 2) {
+                    continue;
+                }
+                let pred = generate_prediction(mode, delta, above, left, top_left, true, true, w, h);
+                let cost = compute_rd_cost(source, &pred, dc_dq, ac_dq, dct::TxType::DctDct);
+                if cost < best_cost {
+                    best_cost = cost;
+                    best_mode = mode;
+                    best_delta = delta;
+                }
             }
         }
     }
 
-    best_mode
+    (best_mode, best_delta)
 }
 
 fn select_best_txtype(source: &[u8], prediction: &[u8], dc_dq: u32, ac_dq: u32) -> dct::TxType {
@@ -1613,13 +1627,13 @@ impl<'a> TileEncoder<'a> {
 
         let y_block = extract_block(&self.pixels.y, w, px_x, px_y, 8, w, h);
 
-        let y_mode = select_best_intra_mode(
+        let (y_mode, y_angle_delta) = select_best_intra_mode(
             &y_block, &above_y, &left_y, top_left_y,
             have_above, have_left, 8, 8,
             self.dq.dc, self.dq.ac,
         );
         let y_pred_block = generate_prediction(
-            y_mode, &above_y, &left_y, top_left_y,
+            y_mode, y_angle_delta, &above_y, &left_y, top_left_y,
             have_above, have_left, 8, 8,
         );
         let y_txtype = select_best_txtype(&y_block, &y_pred_block, self.dq.dc, self.dq.ac);
@@ -1662,7 +1676,7 @@ impl<'a> TileEncoder<'a> {
         self.enc.encode_symbol(y_mode as u32, &mut self.cdf.kf_y_mode[above_mode_ctx][left_mode_ctx], 12);
 
         if (1..=8).contains(&y_mode) {
-            self.enc.encode_symbol(3, &mut self.cdf.angle_delta[(y_mode - 1) as usize], 6);
+            self.enc.encode_symbol((y_angle_delta + 3) as u32, &mut self.cdf.angle_delta[(y_mode - 1) as usize], 6);
         }
 
         let cfl_allowed = bl >= 2;
@@ -3488,7 +3502,7 @@ mod tests {
         let left = [128u8; 8];
         let block = [128u8; 64];
         let dq = crate::dequant::lookup_dequant(128);
-        let mode = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
+        let (mode, _) = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
         assert_eq!(mode, 0);
     }
 
@@ -3503,7 +3517,7 @@ mod tests {
             }
         }
         let dq = crate::dequant::lookup_dequant(128);
-        let mode = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
+        let (mode, _) = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
         assert_eq!(mode, 1);
     }
 
@@ -3518,7 +3532,7 @@ mod tests {
             }
         }
         let dq = crate::dequant::lookup_dequant(128);
-        let mode = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
+        let (mode, _) = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
         assert_eq!(mode, 2);
     }
 
@@ -3656,7 +3670,7 @@ mod tests {
         let above = [100u8; 16];
         let left = [100u8; 16];
         for mode in 3..=8u8 {
-            let pred = generate_prediction(mode, &above, &left, 100, true, true, 8, 8);
+            let pred = generate_prediction(mode, 0, &above, &left, 100, true, true, 8, 8);
             assert_eq!(pred.len(), 64);
             for &p in &pred {
                 assert_eq!(p, 100);
@@ -3676,7 +3690,7 @@ mod tests {
         let d45_pred = predict_directional_z1(&above, 8, 8, dx);
         block.copy_from_slice(&d45_pred);
         let dq = crate::dequant::lookup_dequant(128);
-        let mode = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
+        let (mode, _) = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
         assert!((0..=12).contains(&mode));
     }
 
