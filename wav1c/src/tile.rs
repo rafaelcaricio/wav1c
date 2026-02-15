@@ -2405,12 +2405,26 @@ impl<'a> TileEncoder<'a> {
                     self.encode_partition(bl + 1, bx + hsz, by + hsz);
                 }
             } else if bl == 3 {
-                self.enc.encode_symbol(
-                    0,
-                    &mut self.cdf.partition[bl][part_ctx],
-                    PARTITION_NSYMS[bl],
-                );
-                self.encode_block_16x16(bx, by);
+                let base = self.dq.ac as u64 * self.dq.ac as u64;
+                let use_16x16 = self.skip_mse(bx, by, 3) <= base / 12;
+                if use_16x16 {
+                    self.enc.encode_symbol(
+                        0,
+                        &mut self.cdf.partition[bl][part_ctx],
+                        PARTITION_NSYMS[bl],
+                    );
+                    self.encode_block_16x16(bx, by);
+                } else {
+                    self.enc.encode_symbol(
+                        3,
+                        &mut self.cdf.partition[bl][part_ctx],
+                        PARTITION_NSYMS[bl],
+                    );
+                    self.encode_partition(bl + 1, bx, by);
+                    self.encode_partition(bl + 1, bx + hsz, by);
+                    self.encode_partition(bl + 1, bx, by + hsz);
+                    self.encode_partition(bl + 1, bx + hsz, by + hsz);
+                }
             } else {
                 self.enc.encode_symbol(
                     0,
