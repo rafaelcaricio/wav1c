@@ -41,6 +41,38 @@ const SM_WEIGHTS: [u8; 128] = [
       7,   6,   6,   5,   5,   4,   4,   4,
 ];
 
+#[rustfmt::skip]
+const DR_INTRA_DERIVATIVE: [u16; 44] = [
+       0,
+    1023, 0,
+     547,
+     372, 0, 0,
+     273,
+     215, 0,
+     178,
+     151, 0,
+     132,
+     116, 0,
+     102, 0,
+      90,
+      80, 0,
+      71,
+      64, 0,
+      57,
+      51, 0,
+      45, 0,
+      40,
+      35, 0,
+      31,
+      27, 0,
+      23,
+      19, 0,
+      15, 0,
+      11, 0,
+       7,
+       3,
+];
+
 fn encode_hi_tok(enc: &mut MsacEncoder, cdf: &mut [u16], dc_tok: u32) {
     let mut base = 3;
     for _ in 0..4 {
@@ -207,6 +239,112 @@ fn predict_smooth_h(above: &[u8], left: &[u8], w: usize, h: usize) -> Vec<u8> {
     out
 }
 
+fn predict_directional_z1(above: &[u8], w: usize, h: usize, dx: i32) -> Vec<u8> {
+    let mut out = vec![0u8; w * h];
+    let max_base_x = (w + min(w, h) - 1).min(above.len().saturating_sub(1));
+    for y in 0..h {
+        let xpos_row = dx * (y as i32 + 1);
+        let frac = xpos_row & 0x3E;
+        let mut base = (xpos_row >> 6) as usize;
+        for x in 0..w {
+            if base < max_base_x {
+                let v = above[base] as i32 * (64 - frac)
+                    + above[base + 1] as i32 * frac;
+                out[y * w + x] = ((v + 32) >> 6).clamp(0, 255) as u8;
+            } else {
+                for fill_x in x..w {
+                    out[y * w + fill_x] = above[max_base_x];
+                }
+                break;
+            }
+            base += 1;
+        }
+    }
+    out
+}
+
+fn predict_directional_z3(left: &[u8], w: usize, h: usize, dy: i32) -> Vec<u8> {
+    let mut out = vec![0u8; w * h];
+    let max_base_y = (h + min(w, h) - 1).min(left.len().saturating_sub(1));
+    for x in 0..w {
+        let ypos_col = dy * (x as i32 + 1);
+        let frac = ypos_col & 0x3E;
+        let mut base = (ypos_col >> 6) as usize;
+        for y in 0..h {
+            if base < max_base_y {
+                let v = left[base] as i32 * (64 - frac)
+                    + left[base + 1] as i32 * frac;
+                out[y * w + x] = ((v + 32) >> 6).clamp(0, 255) as u8;
+            } else {
+                for fill_y in y..h {
+                    out[fill_y * w + x] = left[max_base_y];
+                }
+                break;
+            }
+            base += 1;
+        }
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn predict_directional_z2(
+    above: &[u8], left: &[u8], top_left: u8,
+    w: usize, h: usize, dx: i32, dy: i32,
+) -> Vec<u8> {
+    let mut out = vec![0u8; w * h];
+    let mut edge = vec![0u8; w + h + 1];
+    let tl_idx = h;
+    for i in 0..h {
+        edge[h - 1 - i] = left[i];
+    }
+    edge[tl_idx] = top_left;
+    for i in 0..w {
+        edge[tl_idx + 1 + i] = above[i];
+    }
+
+    for y in 0..h {
+        let xpos_row = 64_i32 - dx * (y as i32 + 1);
+        let frac_x = xpos_row & 0x3E;
+        let mut base_x = xpos_row >> 6;
+
+        for x in 0..w {
+            let v;
+            if base_x >= 0 {
+                let bx = base_x as usize;
+                let idx = tl_idx + bx;
+                if idx + 1 < edge.len() {
+                    v = edge[idx] as i32 * (64 - frac_x)
+                        + edge[idx + 1] as i32 * frac_x;
+                } else {
+                    v = edge[edge.len() - 1] as i32 * 64;
+                }
+            } else {
+                let ypos = (y as i32 * 64) - dy * (x as i32 + 1);
+                let base_y = ypos >> 6;
+                let frac_y = ypos & 0x3E;
+                if base_y >= 0 {
+                    let by = base_y as usize;
+                    let idx = tl_idx.wrapping_sub(1).wrapping_sub(by);
+                    if idx < edge.len() && idx >= 1 {
+                        v = edge[idx] as i32 * (64 - frac_y)
+                            + edge[idx - 1] as i32 * frac_y;
+                    } else if idx < edge.len() {
+                        v = edge[idx] as i32 * 64;
+                    } else {
+                        v = top_left as i32 * 64;
+                    }
+                } else {
+                    v = top_left as i32 * 64;
+                }
+            }
+            out[y * w + x] = ((v + 32) >> 6).clamp(0, 255) as u8;
+            base_x += 1;
+        }
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 fn generate_prediction(
     mode: u8, above: &[u8], left: &[u8], top_left: u8,
@@ -215,6 +353,33 @@ fn generate_prediction(
     match mode {
         1 => predict_v(above, w, h),
         2 => predict_h(left, w, h),
+        3 => {
+            let dx = DR_INTRA_DERIVATIVE[22] as i32;
+            predict_directional_z1(above, w, h, dx)
+        }
+        4 => {
+            let dx = DR_INTRA_DERIVATIVE[22] as i32;
+            let dy = DR_INTRA_DERIVATIVE[22] as i32;
+            predict_directional_z2(above, left, top_left, w, h, dx, dy)
+        }
+        5 => {
+            let dx = DR_INTRA_DERIVATIVE[33] as i32;
+            let dy = DR_INTRA_DERIVATIVE[11] as i32;
+            predict_directional_z2(above, left, top_left, w, h, dx, dy)
+        }
+        6 => {
+            let dx = DR_INTRA_DERIVATIVE[11] as i32;
+            let dy = DR_INTRA_DERIVATIVE[33] as i32;
+            predict_directional_z2(above, left, top_left, w, h, dx, dy)
+        }
+        7 => {
+            let dy = DR_INTRA_DERIVATIVE[33] as i32;
+            predict_directional_z3(left, w, h, dy)
+        }
+        8 => {
+            let dx = DR_INTRA_DERIVATIVE[33] as i32;
+            predict_directional_z1(above, w, h, dx)
+        }
         9 => predict_smooth(above, left, w, h),
         10 => predict_smooth_v(above, left, w, h),
         11 => predict_smooth_h(above, left, w, h),
@@ -316,7 +481,17 @@ fn select_best_intra_mode(
         let paeth = predict_paeth(above, left, top_left, w, h);
         let cost = compute_rd_cost(source, &paeth, dc_dq, ac_dq);
         if cost < best_cost {
+            best_cost = cost;
             best_mode = 12;
+        }
+
+        for mode in 3..=8u8 {
+            let pred = generate_prediction(mode, above, left, top_left, true, true, w, h);
+            let cost = compute_rd_cost(source, &pred, dc_dq, ac_dq);
+            if cost < best_cost {
+                best_cost = cost;
+                best_mode = mode;
+            }
         }
     }
 
@@ -1113,11 +1288,13 @@ impl<'a> TileEncoder<'a> {
         let have_above = by > 0;
         let have_left = bx > 0;
 
-        let above_y: Vec<u8> = (0..8)
+        let above_y: Vec<u8> = (0..16)
             .map(|i| {
                 let idx = px_x as usize + i;
                 if have_above && idx < self.ctx.above_recon_y.len() {
                     self.ctx.above_recon_y[idx]
+                } else if have_above && i < 8 {
+                    self.ctx.above_recon_y[(px_x as usize + 7).min(self.ctx.above_recon_y.len() - 1)]
                 } else {
                     128
                 }
@@ -1125,11 +1302,13 @@ impl<'a> TileEncoder<'a> {
             .collect();
 
         let left_local_py = ((by & 15) * 4) as usize;
-        let left_y: Vec<u8> = (0..8)
+        let left_y: Vec<u8> = (0..16)
             .map(|i| {
                 let idx = left_local_py + i;
                 if have_left && idx < self.ctx.left_recon_y.len() {
                     self.ctx.left_recon_y[idx]
+                } else if have_left && i < 8 {
+                    self.ctx.left_recon_y[(left_local_py + 7).min(self.ctx.left_recon_y.len() - 1)]
                 } else {
                     128
                 }
@@ -2728,5 +2907,162 @@ mod tests {
         let good_cost = compute_rd_cost(&source, &good_pred, dq.dc, dq.ac);
         let bad_cost = compute_rd_cost(&source, &bad_pred, dq.dc, dq.ac);
         assert!(good_cost < bad_cost);
+    }
+
+    #[test]
+    fn dr_intra_derivative_key_values() {
+        assert_eq!(DR_INTRA_DERIVATIVE[22], 64);
+        assert_eq!(DR_INTRA_DERIVATIVE[33], 27);
+        assert_eq!(DR_INTRA_DERIVATIVE[11], 151);
+    }
+
+    #[test]
+    fn z1_d45_produces_diagonal() {
+        let above = [10u8, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160];
+        let dx = DR_INTRA_DERIVATIVE[22] as i32;
+        let result = predict_directional_z1(&above, 8, 8, dx);
+        assert_eq!(result.len(), 64);
+        assert_eq!(result[0], above[1]);
+        for &p in &result {
+            assert!((10..=160).contains(&p));
+        }
+    }
+
+    #[test]
+    fn z1_d67_uses_above() {
+        let above = [100u8; 16];
+        let dx = DR_INTRA_DERIVATIVE[33] as i32;
+        let result = predict_directional_z1(&above, 8, 8, dx);
+        assert_eq!(result.len(), 64);
+        for &p in &result {
+            assert_eq!(p, 100);
+        }
+    }
+
+    #[test]
+    fn z3_d203_produces_output() {
+        let left = [10u8, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160];
+        let dy = DR_INTRA_DERIVATIVE[33] as i32;
+        let result = predict_directional_z3(&left, 8, 8, dy);
+        assert_eq!(result.len(), 64);
+        for &p in &result {
+            assert!((10..=160).contains(&p));
+        }
+    }
+
+    #[test]
+    fn z3_uniform_left() {
+        let left = [128u8; 16];
+        let dy = DR_INTRA_DERIVATIVE[33] as i32;
+        let result = predict_directional_z3(&left, 8, 8, dy);
+        for &p in &result {
+            assert_eq!(p, 128);
+        }
+    }
+
+    #[test]
+    fn z2_d135_uniform_neighbors() {
+        let above = [100u8; 16];
+        let left = [100u8; 16];
+        let dx = DR_INTRA_DERIVATIVE[22] as i32;
+        let dy = DR_INTRA_DERIVATIVE[22] as i32;
+        let result = predict_directional_z2(&above, &left, 100, 8, 8, dx, dy);
+        assert_eq!(result.len(), 64);
+        for &p in &result {
+            assert_eq!(p, 100);
+        }
+    }
+
+    #[test]
+    fn z2_d113_produces_valid_output() {
+        let above = [200u8; 16];
+        let left = [50u8; 16];
+        let dx = DR_INTRA_DERIVATIVE[33] as i32;
+        let dy = DR_INTRA_DERIVATIVE[11] as i32;
+        let result = predict_directional_z2(&above, &left, 200, 8, 8, dx, dy);
+        assert_eq!(result.len(), 64);
+        for &p in &result {
+            assert!((50..=200).contains(&p));
+        }
+    }
+
+    #[test]
+    fn z2_d157_produces_valid_output() {
+        let above = [200u8; 16];
+        let left = [50u8; 16];
+        let dx = DR_INTRA_DERIVATIVE[11] as i32;
+        let dy = DR_INTRA_DERIVATIVE[33] as i32;
+        let result = predict_directional_z2(&above, &left, 200, 8, 8, dx, dy);
+        assert_eq!(result.len(), 64);
+        for &p in &result {
+            assert!((50..=200).contains(&p));
+        }
+    }
+
+    #[test]
+    fn generate_prediction_routes_directional_modes() {
+        let above = [100u8; 16];
+        let left = [100u8; 16];
+        for mode in 3..=8u8 {
+            let pred = generate_prediction(mode, &above, &left, 100, true, true, 8, 8);
+            assert_eq!(pred.len(), 64);
+            for &p in &pred {
+                assert_eq!(p, 100);
+            }
+        }
+    }
+
+    #[test]
+    fn mode_selection_considers_directional() {
+        let mut above = [128u8; 16];
+        let left = [128u8; 16];
+        for (i, pixel) in above.iter_mut().enumerate() {
+            *pixel = (i * 16).min(255) as u8;
+        }
+        let mut block = [0u8; 64];
+        let dx = DR_INTRA_DERIVATIVE[22] as i32;
+        let d45_pred = predict_directional_z1(&above, 8, 8, dx);
+        block.copy_from_slice(&d45_pred);
+        let dq = crate::dequant::lookup_dequant(128);
+        let mode = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
+        assert!((0..=12).contains(&mode));
+    }
+
+    #[test]
+    fn directional_z1_output_varies() {
+        let mut above = [0u8; 16];
+        for (i, pixel) in above.iter_mut().enumerate() {
+            *pixel = (i * 17).min(255) as u8;
+        }
+        let dx = DR_INTRA_DERIVATIVE[22] as i32;
+        let result = predict_directional_z1(&above, 8, 8, dx);
+        assert_eq!(result.len(), 64);
+        let unique: std::collections::HashSet<u8> = result.iter().copied().collect();
+        assert!(unique.len() > 1);
+    }
+
+    #[test]
+    fn directional_z3_output_varies() {
+        let mut left = [0u8; 16];
+        for (i, pixel) in left.iter_mut().enumerate() {
+            *pixel = (i * 17).min(255) as u8;
+        }
+        let dy = DR_INTRA_DERIVATIVE[33] as i32;
+        let result = predict_directional_z3(&left, 8, 8, dy);
+        assert_eq!(result.len(), 64);
+        let unique: std::collections::HashSet<u8> = result.iter().copied().collect();
+        assert!(unique.len() > 1);
+    }
+
+    #[test]
+    fn encode_tile_with_diagonal_pixels() {
+        let mut pixels = FramePixels::solid(64, 64, 128, 128, 128);
+        for row in 0..64u32 {
+            for col in 0..64u32 {
+                pixels.y[(row * 64 + col) as usize] = ((row + col) * 2).min(255) as u8;
+            }
+        }
+        let bytes = encode_tile(&pixels);
+        assert!(!bytes.is_empty());
     }
 }
