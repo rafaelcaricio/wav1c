@@ -3538,13 +3538,14 @@ mod tests {
         let mut pixels = FramePixels::solid(64, 64, 128, 128, 128);
         for row in 0..64u32 {
             for col in 0..64u32 {
-                pixels.y[(row * 64 + col) as usize] = ((row * 4) as u8).min(255);
+                pixels.y[(row * 64 + col) as usize] = (row * 4) as u8;
             }
         }
         let bytes = encode_tile(&pixels);
         assert!(!bytes.is_empty());
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn encode_inter_tile_solid(
         width: u32,
         height: u32,
@@ -3734,7 +3735,7 @@ mod tests {
         let mut pixels = FramePixels::solid(64, 64, 128, 128, 128);
         for row in 0..64u32 {
             for col in 0..64u32 {
-                pixels.y[(row * 64 + col) as usize] = ((row * 4) as u8).min(255);
+                pixels.y[(row * 64 + col) as usize] = (row * 4) as u8;
             }
         }
         let reference = FramePixels::solid(64, 64, 128, 128, 128);

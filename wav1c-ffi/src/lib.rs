@@ -1,3 +1,5 @@
+#![allow(clippy::missing_safety_doc)]
+
 use std::ptr;
 
 use wav1c::packet::FrameType;

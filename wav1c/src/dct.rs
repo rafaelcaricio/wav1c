@@ -140,6 +140,7 @@ fn inv_dct16_1d(data: &mut [i32], offset: usize, stride: usize) {
     data[offset + 15 * stride] = clip(t0 - t15a);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fwd_dct8_1d_values(in0: i32, in1: i32, in2: i32, in3: i32, in4: i32, in5: i32, in6: i32, in7: i32) -> (i32, i32, i32, i32, i32, i32, i32, i32) {
     let s0 = in0 + in7;
     let s1 = in1 + in6;
@@ -718,6 +719,7 @@ pub fn inverse_dct_8x8(coeffs: &[i32; 64]) -> [i32; 64] {
 }
 
 #[cfg(test)]
+#[allow(clippy::needless_range_loop)]
 mod tests {
     use super::*;
 
