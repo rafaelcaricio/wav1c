@@ -1,0 +1,63 @@
+{
+  "name": "vmaf_resource_real_content_v1",
+  "description": "Curated real-content clips for wav1c quality tracking. Prefer local ../vmaf assets when available, fallback to vmaf_resource URLs.",
+  "clips": [
+    {
+      "name": "src01_hrc00_576x324",
+      "sources": [
+        "../vmaf/python/test/resource/yuv/src01_hrc00_576x324.yuv",
+        "https://raw.githubusercontent.com/Netflix/vmaf_resource/master/python/test/resource/yuv/src01_hrc00_576x324.yuv"
+      ],
+      "input_type": "rawvideo",
+      "width": 576,
+      "height": 324,
+      "fps": 24,
+      "pix_fmt": "yuv420p",
+      "duration_sec": 6
+    },
+    {
+      "name": "src01_hrc01_576x324",
+      "sources": [
+        "../vmaf/python/test/resource/yuv/src01_hrc01_576x324.yuv",
+        "https://raw.githubusercontent.com/Netflix/vmaf_resource/master/python/test/resource/yuv/src01_hrc01_576x324.yuv"
+      ],
+      "input_type": "rawvideo",
+      "width": 576,
+      "height": 324,
+      "fps": 24,
+      "pix_fmt": "yuv420p",
+      "duration_sec": 6
+    },
+    {
+      "name": "kristen_and_sara_1280x720",
+      "sources": [
+        "../vmaf/python/test/resource/yuv/KristenAndSara_1280x720_8bit_processed.yuv",
+        "https://raw.githubusercontent.com/Netflix/vmaf_resource/master/python/test/resource/yuv/KristenAndSara_1280x720_8bit_processed.yuv"
+      ],
+      "input_type": "rawvideo",
+      "width": 1280,
+      "height": 720,
+      "fps": 24,
+      "pix_fmt": "yuv420p",
+      "duration_sec": 6
+    },
+    {
+      "name": "seeking_30_480_1050",
+      "sources": [
+        "../vmaf/python/test/resource/mp4/Seeking_30_480_1050.mp4",
+        "https://raw.githubusercontent.com/Netflix/vmaf_resource/master/python/test/resource/mp4/Seeking_30_480_1050.mp4"
+      ],
+      "input_type": "video",
+      "duration_sec": 6
+    },
+    {
+      "name": "seeking_10_288_375",
+      "sources": [
+        "../vmaf/python/test/resource/mp4/Seeking_10_288_375.mp4",
+        "https://raw.githubusercontent.com/Netflix/vmaf_resource/master/python/test/resource/mp4/Seeking_10_288_375.mp4"
+      ],
+      "input_type": "video",
+      "duration_sec": 6
+    }
+  ]
+}
