@@ -2274,14 +2274,8 @@ impl<'a> TileEncoder<'a> {
     }
 
     fn should_use_partition_none(&self, bx: u32, by: u32, bl: usize) -> bool {
-        let base = self.dq.ac as u64 * self.dq.ac as u64;
-        let divisor = match bl {
-            1 => 8,
-            2 => 16,
-            3 => 24,
-            _ => 32,
-        };
-        self.skip_mse(bx, by, bl) <= base / divisor
+        // Disable intra skip partitions
+        false
     }
 
     fn encode_skip_block(&mut self, bx: u32, by: u32, bl: usize) {
@@ -2494,12 +2488,13 @@ struct InterTileEncoder<'a> {
     reference: &'a FramePixels,
     dq: DequantValues,
     base_q_idx: u8,
+    global_mv: (i32, i32),
     recon: FramePixels,
     block_mvs: Vec<BlockMv>,
 }
 
 impl<'a> InterTileEncoder<'a> {
-    fn new(pixels: &'a FramePixels, reference: &'a FramePixels, dq: DequantValues, base_q_idx: u8) -> Self {
+    fn new(pixels: &'a FramePixels, reference: &'a FramePixels, dq: DequantValues, base_q_idx: u8, global_mv: (i32, i32)) -> Self {
         let mi_cols = 2 * pixels.width.div_ceil(8);
         let mi_rows = 2 * pixels.height.div_ceil(8);
         let cw = pixels.width.div_ceil(2);
@@ -2516,6 +2511,7 @@ impl<'a> InterTileEncoder<'a> {
             reference,
             dq,
             base_q_idx,
+            global_mv,
             recon: FramePixels {
                 width: pixels.width,
                 height: pixels.height,
@@ -2542,7 +2538,7 @@ impl<'a> InterTileEncoder<'a> {
         let v_src = extract_block(&self.pixels.v, cw, chroma_px_x, chroma_px_y, 4, cw, ch);
 
         let (dx_pixels, dy_pixels) = motion_search_block(
-            &self.pixels.y, &self.reference.y, w, h, px_x, px_y, 8,
+            &self.pixels.y, &self.reference.y, w, h, px_x, px_y, 8, self.global_mv.0, self.global_mv.1,
         );
 
         let (refined_mv_x, refined_mv_y) = subpel_refine(
@@ -3149,6 +3145,99 @@ pub fn encode_inter_tile(pixels: &FramePixels, reference: &FramePixels) -> Vec<u
     encode_inter_tile_with_recon(pixels, reference, dq, crate::DEFAULT_BASE_Q_IDX).0
 }
 
+fn estimate_global_motion(source: &[u8], reference: &[u8], width: u32, height: u32) -> (i32, i32) {
+    if width < 32 || height < 32 {
+        return (0, 0);
+    }
+
+    let down_w = (width / 4) as usize;
+    let down_h = (height / 4) as usize;
+    let mut down_src = vec![0u8; down_w * down_h];
+    let mut down_ref = vec![0u8; down_w * down_h];
+
+    let w = width as usize;
+    for y in 0..down_h {
+        for x in 0..down_w {
+            down_src[y * down_w + x] = source[(y * 4) * w + (x * 4)];
+            down_ref[y * down_w + x] = reference[(y * 4) * w + (x * 4)];
+        }
+    }
+
+    let eval_w = down_w / 2;
+    let eval_h = down_h / 2;
+    let origin_x = down_w / 4;
+    let origin_y = down_h / 4;
+
+    let eval_sad = |dx: i32, dy: i32| -> u32 {
+        let mut sad = 0u32;
+        for y in 0..eval_h {
+            let src_y = origin_y + y;
+            let ref_y = src_y as i32 + dy;
+            if ref_y < 0 || ref_y >= down_h as i32 {
+                return u32::MAX;
+            }
+            
+            let src_offset = src_y * down_w + origin_x;
+            let ref_offset = (ref_y as usize) * down_w + origin_x;
+            
+            for x in 0..eval_w {
+                let ref_x = origin_x as i32 + x as i32 + dx;
+                if ref_x < 0 || ref_x >= down_w as i32 {
+                    return u32::MAX;
+                }
+                
+                let s = down_src[src_offset + x] as i32;
+                let r = down_ref[ref_offset - origin_x + ref_x as usize] as i32;
+                sad += (s - r).unsigned_abs();
+            }
+        }
+        sad
+    };
+
+    let mut best_dx = 0;
+    let mut best_dy = 0;
+    let mut best_sad = eval_sad(0, 0);
+
+    let mut step = (down_w / 8).max(16) as i32;
+    while step >= 1 {
+        let mut found_better = false;
+        let points = [
+            (best_dx - step, best_dy),
+            (best_dx + step, best_dy),
+            (best_dx, best_dy - step),
+            (best_dx, best_dy + step),
+            (best_dx - step, best_dy - step),
+            (best_dx + step, best_dy - step),
+            (best_dx - step, best_dy + step),
+            (best_dx + step, best_dy + step),
+        ];
+
+        let mut current_best_dx = best_dx;
+        let mut current_best_dy = best_dy;
+        let mut current_best_sad = best_sad;
+
+        for &(dx, dy) in &points {
+            let sad = eval_sad(dx, dy);
+            if sad < current_best_sad {
+                current_best_sad = sad;
+                current_best_dx = dx;
+                current_best_dy = dy;
+                found_better = true;
+            }
+        }
+
+        if found_better {
+            best_sad = current_best_sad;
+            best_dx = current_best_dx;
+            best_dy = current_best_dy;
+        } else {
+            step /= 2;
+        }
+    }
+
+    (best_dx * 4, best_dy * 4)
+}
+
 pub fn encode_inter_tile_with_recon(
     pixels: &FramePixels,
     reference: &FramePixels,
@@ -3157,7 +3246,8 @@ pub fn encode_inter_tile_with_recon(
 ) -> (Vec<u8>, FramePixels) {
     assert_eq!(pixels.width, reference.width, "reference frame width mismatch");
     assert_eq!(pixels.height, reference.height, "reference frame height mismatch");
-    let mut tile = InterTileEncoder::new(pixels, reference, dq, base_q_idx);
+    let global_mv = estimate_global_motion(&pixels.y, &reference.y, pixels.width, pixels.height);
+    let mut tile = InterTileEncoder::new(pixels, reference, dq, base_q_idx, global_mv);
 
     let sb_cols = tile.mi_cols.div_ceil(16);
     let sb_rows = tile.mi_rows.div_ceil(16);
@@ -3242,14 +3332,16 @@ fn motion_search_block(
     px_x: u32,
     px_y: u32,
     block_size: u32,
+    start_dx: i32,
+    start_dy: i32,
 ) -> (i32, i32) {
     if px_x + block_size > width || px_y + block_size > height {
         return (0, 0);
     }
 
-    let mut best_dx: i32 = 0;
-    let mut best_dy: i32 = 0;
-    let mut best_sad: u32 = u32::MAX;
+    let mut best_dx: i32;
+    let mut best_dy: i32;
+    let mut best_sad: u32;
     let mut best_cost: i32 = 0;
 
     let mut eval = |dx: i32, dy: i32| -> u32 {
@@ -3277,58 +3369,79 @@ fn motion_search_block(
         sad
     };
 
-    best_sad = eval(0, 0);
+    let mut do_search = |mut b_dx: i32, mut b_dy: i32| -> (i32, i32, u32, i32) {
+        let mut b_sad = eval(b_dx, b_dy);
+        if b_sad == u32::MAX {
+            return (b_dx, b_dy, u32::MAX, 0);
+        }
+        let mut b_cost = b_dx.abs() + b_dy.abs();
+        let search_center_dx = b_dx;
+        let search_center_dy = b_dy;
 
-    let mut step = 16i32;
-    while step >= 1 {
-        let mut found_better = false;
+        let mut step = 16i32;
+        while step >= 1 {
+            let mut found_better = false;
 
-        let points = [
-            (best_dx - step, best_dy),
-            (best_dx + step, best_dy),
-            (best_dx, best_dy - step),
-            (best_dx, best_dy + step),
-            (best_dx - step, best_dy - step),
-            (best_dx + step, best_dy - step),
-            (best_dx - step, best_dy + step),
-            (best_dx + step, best_dy + step),
-        ];
+            let points = [
+                (b_dx - step, b_dy),
+                (b_dx + step, b_dy),
+                (b_dx, b_dy - step),
+                (b_dx, b_dy + step),
+                (b_dx - step, b_dy - step),
+                (b_dx + step, b_dy - step),
+                (b_dx - step, b_dy + step),
+                (b_dx + step, b_dy + step),
+            ];
 
-        let mut current_best_dx = best_dx;
-        let mut current_best_dy = best_dy;
-        let mut current_best_sad = best_sad;
-        let mut current_best_cost = best_cost;
+            let mut c_dx = b_dx;
+            let mut c_dy = b_dy;
+            let mut c_sad = b_sad;
+            let mut c_cost = b_cost;
 
-        for &(dx, dy) in &points {
-            if dx < -32 || dx > 32 || dy < -32 || dy > 32 {
-                continue;
+            for &(dx, dy) in &points {
+                if dx < search_center_dx - 32 || dx > search_center_dx + 32 || dy < search_center_dy - 32 || dy > search_center_dy + 32 {
+                    continue;
+                }
+                let sad = eval(dx, dy);
+                if sad == u32::MAX {
+                    continue;
+                }
+                let cost = dx.abs() + dy.abs();
+
+                if sad < c_sad || (sad == c_sad && cost < c_cost) {
+                    c_sad = sad;
+                    c_dx = dx;
+                    c_dy = dy;
+                    c_cost = cost;
+                    found_better = true;
+                }
             }
-            let sad = eval(dx, dy);
-            if sad == u32::MAX {
-                continue;
-            }
-            let cost = dx.abs() + dy.abs();
 
-            if sad < current_best_sad || (sad == current_best_sad && cost < current_best_cost) {
-                current_best_sad = sad;
-                current_best_dx = dx;
-                current_best_dy = dy;
-                current_best_cost = cost;
-                found_better = true;
+            if found_better {
+                b_sad = c_sad;
+                b_dx = c_dx;
+                b_dy = c_dy;
+                b_cost = c_cost;
+            } else {
+                step /= 2;
             }
         }
+        (b_dx, b_dy, b_sad, b_cost)
+    };
 
-        if found_better {
-            best_sad = current_best_sad;
-            best_dx = current_best_dx;
-            best_dy = current_best_dy;
-            best_cost = current_best_cost;
-        } else {
-            step /= 2;
-        }
+    let (dx1, dy1, sad1, cost1) = do_search(0, 0);
+    
+    if start_dx == 0 && start_dy == 0 {
+        return (dx1, dy1);
     }
+    
+    let (dx2, dy2, sad2, cost2) = do_search(start_dx, start_dy);
 
-    (best_dx, best_dy)
+    if sad2 < sad1 || (sad2 == sad1 && cost2 < cost1) {
+        (dx2, dy2)
+    } else {
+        (dx1, dy1)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -4246,7 +4359,7 @@ mod tests {
             }
         }
         let (dx, dy) = motion_search_block(
-            &source, &reference, 64, 64, 10, 10, 8,
+            &source, &reference, 64, 64, 10, 10, 8, 0, 0,
         );
         assert_eq!((dx, dy), (4, 0));
     }
@@ -4256,7 +4369,7 @@ mod tests {
         let reference = vec![200u8; 64 * 64];
         let source = vec![200u8; 64 * 64];
         let (dx, dy) = motion_search_block(
-            &source, &reference, 64, 64, 10, 10, 8,
+            &source, &reference, 64, 64, 10, 10, 8, 0, 0,
         );
         assert_eq!((dx, dy), (0, 0));
     }
