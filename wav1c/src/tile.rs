@@ -607,8 +607,8 @@ fn select_best_intra_mode(
     let mut exact_best_mode = candidates[0].0;
     let mut exact_best_cost = u64::MAX;
 
-    for i in 0..best_n {
-        let (mode, ref pred, _) = candidates[i];
+    for candidate in candidates.iter().take(best_n) {
+        let (mode, ref pred, _) = *candidate;
         let real_cost = compute_rd_cost(source, pred, dc_dq, ac_dq, dct::TxType::DctDct);
         if real_cost < exact_best_cost {
             exact_best_cost = real_cost;
@@ -1004,6 +1004,7 @@ fn interpolate_block(
     output
 }
 
+#[allow(clippy::too_many_arguments)]
 fn subpel_refine(
     source: &[u8],
     reference: &[u8],
@@ -2391,7 +2392,7 @@ impl<'a> TileEncoder<'a> {
         y_mse + 8 * uv_mse
     }
 
-    fn should_use_partition_none(&self, bx: u32, by: u32, bl: usize) -> bool {
+    fn should_use_partition_none(&self, _bx: u32, _by: u32, _bl: usize) -> bool {
         // Disable intra skip partitions
         false
     }
@@ -2613,8 +2614,10 @@ struct InterTileEncoder<'a> {
     mi_rows: u32,
     pixels: &'a FramePixels,
     reference: &'a FramePixels,
+    #[allow(dead_code)]
     forward_reference: Option<&'a FramePixels>,
     dq: DequantValues,
+    #[allow(dead_code)]
     base_q_idx: u8,
     global_mv: (i32, i32),
     recon: FramePixels,
@@ -3534,6 +3537,7 @@ fn encode_mv_residual(enc: &mut MsacEncoder, mv_cdf: &mut crate::cdf::MvCdf, dy:
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn motion_search_block(
     source: &[u8],
     reference: &[u8],
@@ -3549,12 +3553,8 @@ fn motion_search_block(
         return (0, 0);
     }
 
-    let mut best_dx: i32;
-    let mut best_dy: i32;
-    let mut best_sad: u32;
-    let mut best_cost: i32 = 0;
 
-    let mut eval = |dx: i32, dy: i32| -> u32 {
+    let eval = |dx: i32, dy: i32| -> u32 {
         let ref_x = px_x as i32 + dx;
         let ref_y = px_y as i32 + dy;
 
@@ -3579,7 +3579,7 @@ fn motion_search_block(
         sad
     };
 
-    let mut do_search = |mut b_dx: i32, mut b_dy: i32| -> (i32, i32, u32, i32) {
+    let do_search = |mut b_dx: i32, mut b_dy: i32| -> (i32, i32, u32, i32) {
         let mut b_sad = eval(b_dx, b_dy);
         if b_sad == u32::MAX {
             return (b_dx, b_dy, u32::MAX, 0);

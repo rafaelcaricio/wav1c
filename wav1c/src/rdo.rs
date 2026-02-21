@@ -11,8 +11,7 @@ pub fn calculate_lambda(base_q_idx: u8) -> u32 {
     let q2 = q * q;
     // Lower lambda encourages more bits/splits, which improves VMAF quality.
     // SATD is L1 norm, while standard RDO is L2 norm. So lambda must be scaled down.
-    let lambda = 1.max(q2 >> 8);
-    lambda
+    1.max(q2 >> 8)
 }
 
 /// Computes the full RDO cost metric J = D + lambda * R

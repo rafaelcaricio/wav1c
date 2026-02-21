@@ -47,12 +47,12 @@ pub fn compute_satd(
     let mut satd = 0u32;
     // For small blocks, just sum SAD (e.g. 4x4, 8x4 etc.)
     // We break everything into 4x4 chunks. If a block is not a multiple of 4, we use SAD.
-    if width % 4 != 0 || height % 4 != 0 {
+    if !width.is_multiple_of(4) || !height.is_multiple_of(4) {
         for y in 0..height {
             for x in 0..width {
                 let diff =
                     (source[y * src_stride + x] as i32) - (prediction[y * pred_stride + x] as i32);
-                satd += diff.abs() as u32;
+                satd += diff.unsigned_abs();
             }
         }
         return satd;
@@ -71,7 +71,7 @@ pub fn compute_satd(
             let transformed = hadamard_4x4(&residual, 4);
             let mut chunk_satd = 0u32;
             for &coeff in transformed.iter() {
-                chunk_satd += coeff.abs() as u32;
+                chunk_satd += coeff.unsigned_abs();
             }
             // Scale down to match SD range roughly
             satd += chunk_satd / 2;

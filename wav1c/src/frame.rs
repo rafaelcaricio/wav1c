@@ -160,6 +160,7 @@ pub fn encode_show_existing_frame(slot: u8) -> Vec<u8> {
     w.trailing_bits()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn encode_inter_frame_with_recon(
     pixels: &FramePixels,
     reference: &FramePixels,

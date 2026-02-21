@@ -64,6 +64,7 @@ pub fn cdef_analyze_direction(src: &[u8], stride: usize, bw: usize, bh: usize) -
     best_dir
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn cdef_filter_block(
     src: &[u8],
     stride: usize,

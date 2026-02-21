@@ -111,6 +111,7 @@ impl Encoder {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn encode_single_frame(
         &mut self,
         index: u64,
@@ -134,6 +135,7 @@ impl Encoder {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn encode_single_frame_qidx(
         &mut self,
         index: u64,
@@ -284,7 +286,7 @@ impl Encoder {
         // P-Frame writes to the alt slot
         let alt_slot = 1 - self.base_slot;
         // P-Frame is NOT shown immediately
-        let (mut p_pkt, fwd_recon) = self.encode_single_frame(
+        let (p_pkt, fwd_recon) = self.encode_single_frame(
             f_idx,
             &f_pixels,
             None,
@@ -301,7 +303,7 @@ impl Encoder {
             let (idx, b_pixels) = self.gop_queue.remove(0);
             // They use the newly created fwd_recon as their future reference
             // B-Frames do not refresh any slots (0x00) and ARE shown immediately
-            let (mut b_pkt, _) = self.encode_single_frame_qidx(
+            let (b_pkt, _) = self.encode_single_frame_qidx(
                 idx,
                 &b_pixels,
                 Some(&fwd_recon),
