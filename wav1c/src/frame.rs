@@ -136,24 +136,38 @@ pub fn encode_inter_frame(
     reference: &FramePixels,
     refresh_frame_flags: u8,
     ref_slot: u8,
+    show_frame: bool,
 ) -> Vec<u8> {
     let dq = crate::dequant::lookup_dequant(crate::DEFAULT_BASE_Q_IDX);
     encode_inter_frame_with_recon(
         pixels,
         reference,
+        None,
         refresh_frame_flags,
         ref_slot,
+        0, // bwd_ref_slot
+        show_frame,
         crate::DEFAULT_BASE_Q_IDX,
         dq,
     )
     .0
 }
 
+pub fn encode_show_existing_frame(slot: u8) -> Vec<u8> {
+    let mut w = BitWriter::new();
+    w.write_bit(true); // show_existing_frame
+    w.write_bits(slot as u64, 3); // frame_to_show_map_idx
+    w.trailing_bits()
+}
+
 pub fn encode_inter_frame_with_recon(
     pixels: &FramePixels,
     reference: &FramePixels,
+    forward_reference: Option<&FramePixels>,
     refresh_frame_flags: u8,
     ref_slot: u8,
+    bwd_ref_slot: u8,
+    show_frame: bool,
     base_q_idx: u8,
     dq: DequantValues,
 ) -> (Vec<u8>, FramePixels) {
@@ -162,25 +176,30 @@ pub fn encode_inter_frame_with_recon(
     let sbw = pixels.width.div_ceil(64);
     let sbh = pixels.height.div_ceil(64);
 
-    w.write_bit(false);
-    w.write_bits(1, 2);
-    w.write_bit(true);
-    w.write_bit(true);
-    w.write_bit(true);
-    w.write_bit(false);
+    w.write_bit(false); // show_existing_frame
+    w.write_bits(1, 2); // frame_type
+    w.write_bit(show_frame); // show_frame
+    if !show_frame {
+        w.write_bit(true); // showable_frame
+    }
+    w.write_bit(true); // error_resilient_mode
+    w.write_bit(true); // disable_cdf_update
+    w.write_bit(false); // allow_high_precision_mv
 
     w.write_bits(refresh_frame_flags as u64, 8);
 
+    // Write the 7 reference frame indices. Ref 0 is LAST_FRAME, Ref 1 is LAST2_FRAME... Ref 6 is ALTREF_FRAME
+    // We will assign LAST_FRAME to ref_slot and BWDREF_FRAME to bwd_ref_slot if we have a forward reference.
     for _ in 0..7 {
         w.write_bits(ref_slot as u64, 3);
     }
 
-    w.write_bit(false);
-
-    w.write_bit(false);
-    w.write_bit(false);
-    w.write_bits(0, 2);
-    w.write_bit(false);
+    w.write_bit(false); // frame_size_override_flag
+    
+    w.write_bit(false); // render_and_frame_size_different
+    w.write_bit(false); // is_filter_switchable
+    w.write_bits(0, 2); // interpolation_filter
+    w.write_bit(false); // is_motion_mode_switchable
 
     write_tile_info(&mut w, sbw, sbh);
 
@@ -202,7 +221,7 @@ pub fn encode_inter_frame_with_recon(
     }
 
     let mut header_bytes = w.finalize();
-    let (tile_data, mut recon) = crate::tile::encode_inter_tile_with_recon(pixels, reference, dq, base_q_idx);
+    let (tile_data, mut recon) = crate::tile::encode_inter_tile_with_recon(pixels, reference, forward_reference, dq, base_q_idx);
 
     let (damping_minus_3, y_strength, _uv_strength) = cdef_strength_for_qidx(base_q_idx);
     crate::cdef::apply_cdef_frame(
@@ -368,7 +387,7 @@ mod tests {
     fn inter_frame_header_64x64_bit_layout() {
         let pixels = FramePixels::solid(64, 64, 128, 128, 128);
         let reference = FramePixels::solid(64, 64, 128, 128, 128);
-        let bytes = encode_inter_frame(&pixels, &reference, 0x01, 0);
+        let bytes = encode_inter_frame(&pixels, &reference, 0x01, 0, true);
 
         let mut expected = BitWriter::new();
 
@@ -432,7 +451,7 @@ mod tests {
         let pixels = FramePixels::solid(64, 64, 128, 128, 128);
         let reference = FramePixels::solid(64, 64, 128, 128, 128);
         let key_bytes = encode_frame(&pixels);
-        let inter_bytes = encode_inter_frame(&pixels, &reference, 0x01, 0);
+        let inter_bytes = encode_inter_frame(&pixels, &reference, 0x01, 0, true);
         assert_ne!(key_bytes, inter_bytes);
     }
 
@@ -440,8 +459,8 @@ mod tests {
     fn inter_frame_header_ref_slot_encoded() {
         let pixels = FramePixels::solid(64, 64, 128, 128, 128);
         let reference = FramePixels::solid(64, 64, 128, 128, 128);
-        let bytes_slot0 = encode_inter_frame(&pixels, &reference, 0x01, 0);
-        let bytes_slot3 = encode_inter_frame(&pixels, &reference, 0x01, 3);
+        let bytes_slot0 = encode_inter_frame(&pixels, &reference, 0x01, 0, true);
+        let bytes_slot3 = encode_inter_frame(&pixels, &reference, 0x01, 3, true);
         assert_ne!(bytes_slot0, bytes_slot3);
     }
 
@@ -449,8 +468,8 @@ mod tests {
     fn inter_frame_header_refresh_flags_encoded() {
         let pixels = FramePixels::solid(64, 64, 128, 128, 128);
         let reference = FramePixels::solid(64, 64, 128, 128, 128);
-        let bytes_01 = encode_inter_frame(&pixels, &reference, 0x01, 0);
-        let bytes_ff = encode_inter_frame(&pixels, &reference, 0xFF, 0);
+        let bytes_01 = encode_inter_frame(&pixels, &reference, 0x01, 0, true);
+        let bytes_ff = encode_inter_frame(&pixels, &reference, 0xFF, 0, true);
         assert_ne!(bytes_01, bytes_ff);
     }
 
@@ -458,7 +477,7 @@ mod tests {
     fn inter_frame_starts_with_show_existing_frame_false() {
         let pixels = FramePixels::solid(64, 64, 128, 128, 128);
         let reference = FramePixels::solid(64, 64, 128, 128, 128);
-        let bytes = encode_inter_frame(&pixels, &reference, 0x01, 0);
+        let bytes = encode_inter_frame(&pixels, &reference, 0x01, 0, true);
         assert_eq!(bytes[0] & 0x80, 0);
     }
 
@@ -466,7 +485,7 @@ mod tests {
     fn inter_frame_has_frame_type_1() {
         let pixels = FramePixels::solid(64, 64, 128, 128, 128);
         let reference = FramePixels::solid(64, 64, 128, 128, 128);
-        let bytes = encode_inter_frame(&pixels, &reference, 0x01, 0);
+        let bytes = encode_inter_frame(&pixels, &reference, 0x01, 0, true);
         let frame_type = (bytes[0] >> 5) & 0x03;
         assert_eq!(frame_type, 1);
     }

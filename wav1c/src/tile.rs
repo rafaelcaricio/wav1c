@@ -2486,6 +2486,7 @@ struct InterTileEncoder<'a> {
     mi_rows: u32,
     pixels: &'a FramePixels,
     reference: &'a FramePixels,
+    forward_reference: Option<&'a FramePixels>,
     dq: DequantValues,
     base_q_idx: u8,
     global_mv: (i32, i32),
@@ -2494,7 +2495,7 @@ struct InterTileEncoder<'a> {
 }
 
 impl<'a> InterTileEncoder<'a> {
-    fn new(pixels: &'a FramePixels, reference: &'a FramePixels, dq: DequantValues, base_q_idx: u8, global_mv: (i32, i32)) -> Self {
+    fn new(pixels: &'a FramePixels, reference: &'a FramePixels, forward_reference: Option<&'a FramePixels>, dq: DequantValues, base_q_idx: u8, global_mv: (i32, i32)) -> Self {
         let mi_cols = 2 * pixels.width.div_ceil(8);
         let mi_rows = 2 * pixels.height.div_ceil(8);
         let cw = pixels.width.div_ceil(2);
@@ -2509,6 +2510,7 @@ impl<'a> InterTileEncoder<'a> {
             mi_rows,
             pixels,
             reference,
+            forward_reference,
             dq,
             base_q_idx,
             global_mv,
@@ -2636,12 +2638,13 @@ impl<'a> InterTileEncoder<'a> {
             .encode_bool(true, &mut self.cdf.is_inter[is_inter_ctx]);
 
         let ref_ctx = self.ctx.ref_ctx(bx, by);
-        self.enc
-            .encode_bool(false, &mut self.cdf.single_ref[ref_ctx][0]);
-        self.enc
-            .encode_bool(false, &mut self.cdf.single_ref[ref_ctx][2]);
-        self.enc
-            .encode_bool(false, &mut self.cdf.single_ref[ref_ctx][3]);
+        
+        // Always encode LAST_FRAME (index 0) for now, even for B-frames, to see if 
+        // dav1d decodes the bitstream without the MSAC probability tree desyncing.
+        self.enc.encode_bool(false, &mut self.cdf.single_ref[ref_ctx][0]);
+        self.enc.encode_bool(false, &mut self.cdf.single_ref[ref_ctx][2]);
+        self.enc.encode_bool(false, &mut self.cdf.single_ref[ref_ctx][3]);
+        self.block_mvs[(by * self.mi_cols + bx) as usize].ref_frame = 0;
 
         let newmv_ctx = self.ctx.newmv_ctx(bx, by);
 
@@ -3142,7 +3145,7 @@ impl<'a> InterTileEncoder<'a> {
 
 pub fn encode_inter_tile(pixels: &FramePixels, reference: &FramePixels) -> Vec<u8> {
     let dq = crate::dequant::lookup_dequant(crate::DEFAULT_BASE_Q_IDX);
-    encode_inter_tile_with_recon(pixels, reference, dq, crate::DEFAULT_BASE_Q_IDX).0
+    encode_inter_tile_with_recon(pixels, reference, None, dq, crate::DEFAULT_BASE_Q_IDX).0
 }
 
 fn estimate_global_motion(source: &[u8], reference: &[u8], width: u32, height: u32) -> (i32, i32) {
@@ -3241,13 +3244,14 @@ fn estimate_global_motion(source: &[u8], reference: &[u8], width: u32, height: u
 pub fn encode_inter_tile_with_recon(
     pixels: &FramePixels,
     reference: &FramePixels,
+    forward_reference: Option<&FramePixels>,
     dq: DequantValues,
     base_q_idx: u8,
 ) -> (Vec<u8>, FramePixels) {
     assert_eq!(pixels.width, reference.width, "reference frame width mismatch");
     assert_eq!(pixels.height, reference.height, "reference frame height mismatch");
     let global_mv = estimate_global_motion(&pixels.y, &reference.y, pixels.width, pixels.height);
-    let mut tile = InterTileEncoder::new(pixels, reference, dq, base_q_idx, global_mv);
+    let mut tile = InterTileEncoder::new(pixels, reference, forward_reference, dq, base_q_idx, global_mv);
 
     let sb_cols = tile.mi_cols.div_ceil(16);
     let sb_rows = tile.mi_rows.div_ceil(16);

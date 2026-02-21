@@ -32,6 +32,8 @@ pub struct EncodeConfig {
     pub keyint: usize,
     pub target_bitrate: Option<u64>,
     pub fps: f64,
+    pub b_frames: bool,
+    pub gop_size: usize,
 }
 
 impl Default for EncodeConfig {
@@ -41,6 +43,8 @@ impl Default for EncodeConfig {
             keyint: DEFAULT_KEYINT,
             target_bitrate: None,
             fps: 25.0,
+            b_frames: false,
+            gop_size: 3,
         }
     }
 }
@@ -81,10 +85,16 @@ pub fn encode(frames: &[y4m::FramePixels], config: &EncodeConfig) -> Vec<u8> {
     let mut output = Vec::new();
     ivf::write_ivf_header(&mut output, width as u16, height as u16, frames.len() as u32).unwrap();
 
-    for (i, pixels) in frames.iter().enumerate() {
+    for pixels in frames {
         enc.send_frame(pixels).expect("send_frame failed");
-        let packet = enc.receive_packet().expect("no packet after send_frame");
-        ivf::write_ivf_frame(&mut output, i as u64, &packet.data).unwrap();
+        while let Some(packet) = enc.receive_packet() {
+            ivf::write_ivf_frame(&mut output, packet.frame_number, &packet.data).unwrap();
+        }
+    }
+
+    enc.flush();
+    while let Some(packet) = enc.receive_packet() {
+        ivf::write_ivf_frame(&mut output, packet.frame_number, &packet.data).unwrap();
     }
 
     if let Some(stats) = enc.rate_control_stats() {

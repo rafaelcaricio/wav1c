@@ -3,6 +3,7 @@
 pub enum ObuType {
     SequenceHeader = 1,
     TemporalDelimiter = 2,
+    FrameHeader = 3,
     Frame = 6,
 }
 

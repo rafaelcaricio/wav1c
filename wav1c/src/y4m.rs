@@ -1,4 +1,4 @@
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FramePixels {
     pub y: Vec<u8>,
     pub u: Vec<u8>,

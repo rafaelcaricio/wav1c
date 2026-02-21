@@ -40,6 +40,12 @@ impl BitWriter {
         self.byte_align();
         self.buf
     }
+
+    pub fn trailing_bits(mut self) -> Vec<u8> {
+        self.write_bit(true);
+        self.byte_align();
+        self.buf
+    }
 }
 
 #[cfg(test)]
