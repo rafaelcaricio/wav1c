@@ -1,9 +1,11 @@
 /target
 __pycache__
 .claude
+av1-spec.md
 *.yuv
 *.ivf
 *.y4m
 *.json
 *.mp4
 *.m4a
+*.heic

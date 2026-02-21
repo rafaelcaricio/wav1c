@@ -4,28 +4,44 @@
 [![license](https://img.shields.io/crates/l/wav1c.svg)](LICENSE)
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](https://github.com/rust-secure-code/safety-dance/)
 
-A spec-compliant AV1 video encoder written from scratch in safe Rust with zero dependencies. Usable as a Rust library, C shared library, WebAssembly module, or as an FFmpeg encoder plugin.
+A spec-compliant AV1 encoder written from scratch in safe Rust with zero runtime dependencies.
 
-## Features
+`wav1c` can be used as:
+- A Rust library (`wav1c` crate)
+- A CLI encoder (`wav1c-cli`)
+- A C ABI library (`wav1c-ffi`)
+- A WebAssembly module (`wav1c-wasm`)
+- An FFmpeg external encoder (`libwav1c`)
 
-- YUV 4:2:0 encoding (8-bit)
-- Intra prediction (DC, V, H, Smooth, Paeth) with RD-cost mode selection
-- Inter prediction (GLOBALMV with LAST_FRAME reference)
-- Forward DCT/ADST transforms with RD-cost type selection (4x4 chroma, 8x8/16x16 luma)
-- MSAC arithmetic coding with full coefficient encoding
-- GoP structure (keyframe + inter frames)
-- Arbitrary frame dimensions up to 4096x2304
-- Y4M input, IVF output
-- Streaming encoder API (frame-by-frame encoding)
-- C FFI shared library for embedding in non-Rust applications
+## Feature Summary
 
-## Workspace Structure
+- AV1 4:2:0 encoding for SDR and HDR workflows
+- Bit depths: 8-bit and 10-bit
+- HDR signaling:
+  - Sequence-header color signaling (range + color description)
+  - HDR metadata OBUs:
+    - CLL (`max_cll`, `max_fall`)
+    - MDCV (mastering display metadata)
+- Y4M parsing:
+  - `C420*` 8-bit and `C420p10`
+  - `XCOLORRANGE=FULL|LIMITED` in stream and `FRAME` headers
+  - Typed parse errors for malformed/truncated input
+- Intra + inter coding pipeline with RD decisions, transforms, and entropy coding
+- B-frame pipeline support
+- Stream dimensions: `1..=4096` width and `1..=2304` height
 
-```
-wav1c/          Core library with batch and streaming APIs
+Current scope limits:
+- Chroma format: 4:2:0 only
+- Bit depth: 8/10-bit only (no 12-bit)
+
+## Workspace Layout
+
+```text
+wav1c/          Core library (Rust API, bitstream generation)
 wav1c-cli/      Command-line encoder
-wav1c-ffi/      C FFI shared library (cdylib + staticlib)
+wav1c-ffi/      C FFI shared/static library
 wav1c-wasm/     WebAssembly bindings (wasm-bindgen)
+docs/           Project documentation (including HDR + HEIC guide)
 ```
 
 ## Build
@@ -36,117 +52,264 @@ cargo build --workspace --release
 
 ## CLI Usage
 
-Encode a Y4M video:
+All examples below use the workspace binary:
 
 ```bash
-wav1c input.y4m -o output.ivf
+cargo run -q -p wav1c-cli -- <args...>
 ```
 
-Encode a solid color frame:
+Basic SDR encode from Y4M:
 
 ```bash
-wav1c 320 240 128 128 128 -o gray.ivf
+cargo run -q -p wav1c-cli -- input.y4m -o output.ivf
 ```
 
-With options:
+Solid-color frame encode (5 positional args: `W H Y U V`):
 
 ```bash
-wav1c input.y4m -o output.ivf -q 100 --keyint 10 --bitrate 500k
+cargo run -q -p wav1c-cli -- 320 240 128 128 128 -o gray.ivf
 ```
 
-Decode with dav1d:
+10-bit HDR10 encode from Y4M:
 
 ```bash
-dav1d -i output.ivf -o decoded.y4m
+cargo run -q -p wav1c-cli -- input_10bit.y4m -o output_hdr.ivf \
+  --bit-depth 10 \
+  --hdr10 \
+  --color-range full \
+  --max-cll 203 \
+  --max-fall 64
 ```
 
-Generate test input with ffmpeg:
+Custom color description + MDCV:
 
 ```bash
-ffmpeg -f lavfi -i testsrc=duration=2:size=320x240:rate=25 -pix_fmt yuv420p input.y4m
+cargo run -q -p wav1c-cli -- input_10bit.y4m -o output_hdr.ivf \
+  --bit-depth 10 \
+  --color-range limited \
+  --color-primaries 9 \
+  --transfer 16 \
+  --matrix 9 \
+  --mdcv 34000,16000,13250,34500,7500,3000,15635,16450,10000000,1
 ```
 
-## Rust Streaming API
+CLI HDR flags:
+- `--bit-depth <8|10>`
+- `--hdr10`
+- `--color-range <limited|full>`
+- `--color-primaries <u8>`
+- `--transfer <u8>`
+- `--matrix <u8>`
+- `--max-cll <u16>` and `--max-fall <u16>` (must be provided together)
+- `--mdcv <rx,ry,gx,gy,bx,by,wx,wy,max_lum,min_lum>`
+
+Notes:
+- When input is Y4M and `--bit-depth` or `--color-range` are omitted, values are inferred from Y4M headers.
+- `--hdr10` applies default color description (`primaries=9`, `transfer=16`, `matrix=9`).
+
+## Rust API
+
+### Backward-compatible convenience APIs (8-bit)
+
+The existing helpers are still available:
+- `encode_av1_ivf(...)`
+- `encode_av1_ivf_y4m(...)`
+- `encode_av1_ivf_multi(...)`
+- `FramePixels::solid(...)`
+
+### Streaming API with 10-bit/HDR config
 
 ```rust
-use wav1c::{Encoder, EncoderConfig, FrameType};
 use wav1c::y4m::FramePixels;
+use wav1c::{
+    BitDepth, ColorRange, ContentLightLevel, Encoder, EncoderConfig,
+    MasteringDisplayMetadata, VideoSignal,
+};
 
 let config = EncoderConfig {
     base_q_idx: 128,
     keyint: 25,
     target_bitrate: None,
     fps: 25.0,
+    b_frames: false,
+    gop_size: 3,
+    video_signal: VideoSignal::hdr10(ColorRange::Full),
+    content_light: Some(ContentLightLevel {
+        max_content_light_level: 203,
+        max_frame_average_light_level: 64,
+    }),
+    mastering_display: Some(MasteringDisplayMetadata {
+        primaries: [[34000, 16000], [13250, 34500], [7500, 3000]],
+        white_point: [15635, 16450],
+        max_luminance: 10_000_000,
+        min_luminance: 1,
+    }),
 };
 
-let mut encoder = Encoder::new(320, 240, config).unwrap();
-let frame = FramePixels::solid(320, 240, 128, 128, 128);
+let mut enc = Encoder::new(1920, 1080, config)?;
+let frame = FramePixels::solid_with_bit_depth(
+    1920,
+    1080,
+    512,
+    512,
+    512,
+    BitDepth::Ten,
+    ColorRange::Full,
+);
 
-encoder.send_frame(&frame).unwrap();
-let packet = encoder.receive_packet().unwrap();
-
-assert_eq!(packet.frame_type, FrameType::Key);
-// packet.data contains raw AV1 OBUs (TD + SequenceHeader + Frame)
+enc.send_frame(&frame)?;
+enc.flush();
+while let Some(pkt) = enc.receive_packet() {
+    // pkt.data contains AV1 OBUs
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-## C FFI
+### Key signal and metadata types
 
-The `wav1c-ffi` crate produces `libwav1c_ffi.dylib` (macOS) / `libwav1c_ffi.so` (Linux) and `libwav1c_ffi.a`.
+Exported from the crate root:
+- `BitDepth`
+- `ColorRange`
+- `ColorDescription`
+- `VideoSignal`
+- `ContentLightLevel`
+- `MasteringDisplayMetadata`
+
+## C FFI API (`wav1c-ffi`)
+
+Header: `wav1c-ffi/include/wav1c.h`
+
+Legacy 8-bit API (unchanged):
+- `wav1c_encoder_new(...)`
+- `wav1c_encoder_send_frame(...)`
+
+Extended 10-bit/HDR API:
+- `wav1c_encoder_new_ex(...)`
+- `wav1c_encoder_send_frame_u16(...)`
+
+`Wav1cConfigEx` fields:
+- `bit_depth`: `8` or `10`
+- `color_range`: `0` limited, `1` full
+- `color_primaries`, `transfer_characteristics`, `matrix_coefficients`: set to `-1` to omit color description
+- `has_cll`, `max_cll`, `max_fall`
+- `has_mdcv`, primaries/white-point/luminance fields
+
+10-bit C usage example:
 
 ```c
 #include "wav1c.h"
 
-Wav1cConfig cfg = { .base_q_idx = 128, .keyint = 25, .fps = 25.0 };
-Wav1cEncoder *enc = wav1c_encoder_new(320, 240, &cfg);
+Wav1cConfigEx cfg = {0};
+cfg.base_q_idx = 128;
+cfg.keyint = 25;
+cfg.fps = 25.0;
+cfg.bit_depth = 10;
+cfg.color_range = 1; // full
+cfg.color_primaries = 9;
+cfg.transfer_characteristics = 16;
+cfg.matrix_coefficients = 9;
+cfg.has_cll = 1;
+cfg.max_cll = 203;
+cfg.max_fall = 64;
 
-wav1c_encoder_send_frame(enc, y, y_len, u, u_len, v, v_len, width, width / 2);
+Wav1cEncoder *enc = wav1c_encoder_new_ex(1920, 1080, &cfg);
+if (!enc) return -1;
+
+// y_len/u_len/v_len are sample counts, not byte counts.
+wav1c_encoder_send_frame_u16(enc, y, y_len, u, u_len, v, v_len, y_stride, uv_stride);
 Wav1cPacket *pkt = wav1c_encoder_receive_packet(enc);
-// pkt->data, pkt->size contain raw AV1 OBUs
 
-wav1c_packet_free(pkt);
+if (pkt) wav1c_packet_free(pkt);
 wav1c_encoder_free(enc);
 ```
 
-Build the C example:
+Build artifacts:
+- `libwav1c_ffi.dylib` / `libwav1c_ffi.so`
+- `libwav1c_ffi.a`
+
+## WebAssembly API (`wav1c-wasm`)
+
+Main entry point: `WasmEncoder`
+
+Constructors:
+- `new(width, height, base_q_idx, keyint)` (compat mode)
+- `new_with_config(...)`
+- `new_ex(...)` (explicit bit depth/signal + optional CLL)
+
+10-bit/HDR methods:
+- `encode_frame_10bit(y, u, v)`
+- `set_hdr10(color_range)`
+- `set_video_signal(bit_depth, color_range, cp, tc, mc)`
+- `set_content_light_level(max_cll, max_fall)`
+- `set_mastering_display_metadata(...)`
+
+Important: signal and metadata mutators must be called before the first submitted frame.
+
+## FFmpeg Integration (`libwav1c`)
+
+This repository contains `ffmpeg-libwav1c.patch`, and we also maintain direct FFmpeg integration updates in `../FFmpeg` during active development.
+
+Build `wav1c-ffi` first:
 
 ```bash
 cargo build -p wav1c-ffi --release
-cc -o encode -I wav1c-ffi/include wav1c-ffi/examples/encode.c \
-   -L target/release -lwav1c_ffi
 ```
 
-## FFmpeg Integration
-
-A patch is included to add wav1c as an FFmpeg external encoder (`-c:v libwav1c`).
+Configure FFmpeg with `libwav1c`:
 
 ```bash
-# Build the wav1c static library
-cargo build -p wav1c-ffi --release
-
-# Clone and patch FFmpeg
-git clone https://git.ffmpeg.org/ffmpeg.git
-cd ffmpeg
-git apply /path/to/wav1c/ffmpeg-libwav1c.patch
-
-# Configure with libwav1c (adjust library path as needed)
+cd ../FFmpeg
 ./configure --enable-libwav1c \
-  --extra-cflags="-I/path/to/wav1c/wav1c-ffi/include" \
-  --extra-ldflags="-L/path/to/wav1c/target/release"
-
+  --extra-cflags="-I/absolute/path/to/wav1c/wav1c-ffi/include" \
+  --extra-ldflags="-L/absolute/path/to/wav1c/target/release"
 make -j$(sysctl -n hw.ncpu 2>/dev/null || nproc)
-
-# Encode
-./ffmpeg -i input.y4m -c:v libwav1c -wav1c-q 128 output.mp4
 ```
 
-## Test
+Run with dynamic library path (macOS example):
+
+```bash
+DYLD_LIBRARY_PATH=/absolute/path/to/wav1c/target/release ./ffmpeg \
+  -i input.y4m \
+  -pix_fmt yuv420p10le \
+  -c:v libwav1c \
+  -wav1c-hdr10 1 \
+  -wav1c-max-cll 203 \
+  -wav1c-max-fall 64 \
+  -f ivf output.ivf
+```
+
+Supported FFmpeg `libwav1c` pixel formats:
+- `yuv420p`
+- `yuv420p10le`
+
+Supported FFmpeg private options:
+- `-wav1c-q`
+- `-wav1c-b-frames`
+- `-wav1c-gop-size`
+- `-wav1c-hdr10`
+- `-wav1c-max-cll`
+- `-wav1c-max-fall`
+- `-wav1c-mdcv`
+
+## HEIC to HDR Workflow
+
+For a full HEIC -> HDR AV1 workflow (CLI and FFmpeg), including verification with `ffprobe` and `dav1d`, see:
+
+- `docs/HDR_HEIC_MANUAL.md`
+
+Practical note for HEIC inputs:
+- Some HEIC files decode as tile grids.
+- Do not force-map an individual dependent tile if you want the full composed image.
+- If source height is above `2304`, resize before encoding (current encoder limit).
+
+## Testing
 
 ```bash
 cargo test --workspace
 ```
 
-Integration tests decode output with [dav1d](https://code.videolan.org/videolan/dav1d) and verify pixel accuracy. Install dav1d and ensure it is available in your `PATH`, or set the `DAV1D` environment variable to point to the binary. Tests will skip gracefully if dav1d is not found.
+Integration tests decode encoded output with [dav1d](https://code.videolan.org/videolan/dav1d). If `dav1d` is unavailable, tests that require it are skipped.
 
 ## License
 
-This project is licensed under the Mozilla Public License 2.0. See [LICENSE](LICENSE) for details.
+This project is licensed under the Mozilla Public License 2.0. See [LICENSE](LICENSE).
