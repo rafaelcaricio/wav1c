@@ -25,6 +25,8 @@ pub struct Wav1cConfig {
     pub keyint: usize,
     pub target_bitrate: u64,
     pub fps: f64,
+    pub b_frames: i32,
+    pub gop_size: usize,
 }
 
 #[unsafe(no_mangle)]
@@ -48,6 +50,8 @@ pub unsafe extern "C" fn wav1c_encoder_new(
             Some(cfg.target_bitrate)
         },
         fps: cfg.fps,
+        b_frames: cfg.b_frames != 0,
+        gop_size: if cfg.gop_size > 0 { cfg.gop_size } else { 3 },
     };
 
     match wav1c::Encoder::new(width, height, config) {

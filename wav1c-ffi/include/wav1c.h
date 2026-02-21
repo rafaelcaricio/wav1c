@@ -22,6 +22,8 @@ typedef struct {
     size_t   keyint;
     uint64_t target_bitrate;
     double   fps;
+    int32_t  b_frames;
+    size_t   gop_size;
 } Wav1cConfig;
 
 Wav1cEncoder *wav1c_encoder_new(uint32_t width, uint32_t height,
