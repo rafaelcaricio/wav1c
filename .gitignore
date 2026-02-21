@@ -1,3 +1,7 @@
 /target
 __pycache__
 .claude
+*.yuv
+*.ivf
+*.y4m
+*.json
