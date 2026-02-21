@@ -5,3 +5,5 @@ __pycache__
 *.ivf
 *.y4m
 *.json
+*.mp4
+*.m4a

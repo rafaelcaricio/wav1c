@@ -1,9 +1,9 @@
 #![forbid(unsafe_code)]
 
 use wasm_bindgen::prelude::*;
+use wav1c::EncoderConfig;
 use wav1c::packet::FrameType;
 use wav1c::y4m::FramePixels;
-use wav1c::EncoderConfig;
 
 #[wasm_bindgen]
 pub struct WasmEncoder {
@@ -16,7 +16,12 @@ pub struct WasmEncoder {
 #[wasm_bindgen]
 impl WasmEncoder {
     #[wasm_bindgen(constructor)]
-    pub fn new(width: u32, height: u32, base_q_idx: u8, keyint: usize) -> Result<WasmEncoder, JsError> {
+    pub fn new(
+        width: u32,
+        height: u32,
+        base_q_idx: u8,
+        keyint: usize,
+    ) -> Result<WasmEncoder, JsError> {
         let config = EncoderConfig {
             base_q_idx,
             keyint,
@@ -44,7 +49,10 @@ impl WasmEncoder {
         self.encoder
             .send_frame(&frame)
             .map_err(|e| JsError::new(&format!("{:?}", e)))?;
-        let packet = self.encoder.receive_packet().ok_or_else(|| JsError::new("no packet"))?;
+        let packet = self
+            .encoder
+            .receive_packet()
+            .ok_or_else(|| JsError::new("no packet"))?;
         self.last_keyframe = matches!(packet.frame_type, FrameType::Key);
         self.last_frame_number = packet.frame_number;
         self.last_packet_size = packet.data.len();

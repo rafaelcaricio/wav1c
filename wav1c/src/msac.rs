@@ -454,7 +454,9 @@ mod tests {
 
     #[test]
     fn msac_roundtrip_many_symbols() {
-        let symbols = [0u32, 1, 2, 0, 0, 1, 2, 1, 0, 2, 2, 1, 0, 0, 0, 1, 2, 2, 1, 0];
+        let symbols = [
+            0u32, 1, 2, 0, 0, 1, 2, 1, 0, 2, 2, 1, 0, 0, 0, 1, 2, 2, 1, 0,
+        ];
         let mut enc = MsacEncoder::new();
         let mut cdf_enc = [24576u16, 16384, 8192, 0];
         for &s in &symbols {
@@ -466,7 +468,10 @@ mod tests {
         let mut cdf_dec = [24576u16, 16384, 8192, 0];
         for (i, &expected) in symbols.iter().enumerate() {
             let decoded = dec.decode_symbol_adapt(&mut cdf_dec, 3);
-            assert_eq!(decoded, expected, "Symbol mismatch at index {i}: expected={expected} got={decoded}");
+            assert_eq!(
+                decoded, expected,
+                "Symbol mismatch at index {i}: expected={expected} got={decoded}"
+            );
         }
         assert_eq!(cdf_enc, cdf_dec, "CDF mismatch after all symbols");
     }
@@ -492,7 +497,9 @@ mod tests {
 
     #[test]
     fn msac_roundtrip_bool_equi() {
-        let values = [true, false, true, true, false, false, true, false, true, true];
+        let values = [
+            true, false, true, true, false, false, true, false, true, true,
+        ];
         let mut enc = MsacEncoder::new();
         for &v in &values {
             enc.encode_bool_equi(v);
@@ -518,7 +525,10 @@ mod tests {
         let mut dec = Dav1dMsacDecoder::new(&bytes, true);
         for (i, &expected) in values.iter().enumerate() {
             let decoded = dec.decode_golomb();
-            assert_eq!(decoded, expected, "Golomb mismatch at index {i}: expected={expected} got={decoded}");
+            assert_eq!(
+                decoded, expected,
+                "Golomb mismatch at index {i}: expected={expected} got={decoded}"
+            );
         }
     }
 

@@ -43,9 +43,5 @@ pub fn estimate_tx_type_bits(tx_type: TxType) -> u32 {
 
 /// Estimates the bit cost of signaling a partition split vs none
 pub fn estimate_partition_bits(is_split: bool) -> u32 {
-    if is_split {
-        12
-    } else {
-        4
-    }
+    if is_split { 12 } else { 4 }
 }

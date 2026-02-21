@@ -1,8 +1,8 @@
 use std::env;
 use std::fs;
 use std::path::Path;
-use wav1c::y4m::FramePixels;
 use wav1c::EncodeConfig;
+use wav1c::y4m::FramePixels;
 
 fn print_usage() {
     eprintln!("Usage: encode_y4m <input.y4m> <output.ivf> [options]");
@@ -64,12 +64,13 @@ fn main() {
     }
 
     println!("Loading frames from {}...", input_path);
-    let frames = FramePixels::all_from_y4m_file(Path::new(input_path))
-        .expect("Failed to load y4m");
+    let frames = FramePixels::all_from_y4m_file(Path::new(input_path)).expect("Failed to load y4m");
     println!("Loaded {} frames", frames.len());
 
-    println!("Encoding (q={}, keyint={}, b_frames={}, gop_size={})...",
-        config.base_q_idx, config.keyint, config.b_frames, config.gop_size);
+    println!(
+        "Encoding (q={}, keyint={}, b_frames={}, gop_size={})...",
+        config.base_q_idx, config.keyint, config.b_frames, config.gop_size
+    );
     let ivf_data = wav1c::encode(&frames, &config);
 
     println!("Writing to {}...", output_path);

@@ -141,7 +141,16 @@ fn inv_dct16_1d(data: &mut [i32], offset: usize, stride: usize) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn fwd_dct8_1d_values(in0: i32, in1: i32, in2: i32, in3: i32, in4: i32, in5: i32, in6: i32, in7: i32) -> (i32, i32, i32, i32, i32, i32, i32, i32) {
+fn fwd_dct8_1d_values(
+    in0: i32,
+    in1: i32,
+    in2: i32,
+    in3: i32,
+    in4: i32,
+    in5: i32,
+    in6: i32,
+    in7: i32,
+) -> (i32, i32, i32, i32, i32, i32, i32, i32) {
     let s0 = in0 + in7;
     let s1 = in1 + in6;
     let s2 = in2 + in5;
@@ -204,8 +213,7 @@ fn fwd_dct16_1d(data: &mut [i32], offset: usize, stride: usize) {
     let d6 = in6 - in9;
     let d7 = in7 - in8;
 
-    let (e0, e1, e2, e3, e4, e5, e6, e7) =
-        fwd_dct8_1d_values(s0, s1, s2, s3, s4, s5, s6, s7);
+    let (e0, e1, e2, e3, e4, e5, e6, e7) = fwd_dct8_1d_values(s0, s1, s2, s3, s4, s5, s6, s7);
 
     let u0 = ((d2 - d5) * 181 + 128) >> 8;
     let u1 = ((d2 + d5) * 181 + 128) >> 8;
@@ -356,13 +364,25 @@ fn inv_adst4_1d(data: &mut [i32], offset: usize, stride: usize) {
     let in2 = data[offset + 2 * stride];
     let in3 = data[offset + 3 * stride];
 
-    let o0 = ((1321 * in0 + (3803 - 4096) * in2 + (2482 - 4096) * in3 + (3344 - 4096) * in1 + 2048) >> 12)
-        + in2 + in3 + in1;
-    let o1 = (((2482 - 4096) * in0 - 1321 * in2 - (3803 - 4096) * in3 + (3344 - 4096) * in1 + 2048) >> 12)
-        + in0 - in3 + in1;
+    let o0 =
+        ((1321 * in0 + (3803 - 4096) * in2 + (2482 - 4096) * in3 + (3344 - 4096) * in1 + 2048)
+            >> 12)
+            + in2
+            + in3
+            + in1;
+    let o1 =
+        (((2482 - 4096) * in0 - 1321 * in2 - (3803 - 4096) * in3 + (3344 - 4096) * in1 + 2048)
+            >> 12)
+            + in0
+            - in3
+            + in1;
     let o2 = (209 * (in0 - in2 + in3) + 128) >> 8;
-    let o3 = (((3803 - 4096) * in0 + (2482 - 4096) * in2 - 1321 * in3 - (3344 - 4096) * in1 + 2048) >> 12)
-        + in0 + in2 - in1;
+    let o3 = (((3803 - 4096) * in0 + (2482 - 4096) * in2 - 1321 * in3 - (3344 - 4096) * in1
+        + 2048)
+        >> 12)
+        + in0
+        + in2
+        - in1;
 
     data[offset] = clip(o0);
     data[offset + stride] = clip(o1);
@@ -829,9 +849,7 @@ mod tests {
 
     #[test]
     fn roundtrip_4x4_small_residual() {
-        let original = [
-            3, -1, 2, 0, -2, 1, -3, 4, 1, 0, -1, 2, -4, 3, 0, -2,
-        ];
+        let original = [3, -1, 2, 0, -2, 1, -3, 4, 1, 0, -1, 2, -4, 3, 0, -2];
         let coeffs = forward_dct_4x4(&original);
         let recovered = inverse_dct_4x4(&coeffs);
         for i in 0..16 {
@@ -866,9 +884,7 @@ mod tests {
 
     #[test]
     fn roundtrip_4x4_typical_residual() {
-        let original = [
-            -15, 8, -3, 12, 7, -20, 5, 1, -8, 14, -6, 3, 10, -2, 9, -11,
-        ];
+        let original = [-15, 8, -3, 12, 7, -20, 5, 1, -8, 14, -6, 3, 10, -2, 9, -11];
         let coeffs = forward_dct_4x4(&original);
         let recovered = inverse_dct_4x4(&coeffs);
         for i in 0..16 {
@@ -950,7 +966,9 @@ mod tests {
 
     #[test]
     fn inverse_4x4_matches_dav1d_structure() {
-        let coeffs = [100, 20, -10, 5, 30, -15, 8, -3, -5, 12, 0, -7, 18, -9, 4, -2];
+        let coeffs = [
+            100, 20, -10, 5, 30, -15, 8, -3, -5, 12, 0, -7, 18, -9, 4, -2,
+        ];
         let result = inverse_dct_4x4(&coeffs);
         let mut buf = coeffs;
         transpose_4x4(&mut buf);
@@ -994,7 +1012,11 @@ mod tests {
         let coeffs = forward_dct_8x8(&input);
         assert_ne!(coeffs[0], 0);
         for i in 1..64 {
-            assert_eq!(coeffs[i], 0, "AC coefficient at {} should be zero for constant input", i);
+            assert_eq!(
+                coeffs[i], 0,
+                "AC coefficient at {} should be zero for constant input",
+                i
+            );
         }
     }
 
@@ -1053,8 +1075,7 @@ mod tests {
     #[test]
     fn roundtrip_4x4_checkerboard() {
         let original = [
-            100, -100, 100, -100, -100, 100, -100, 100, 100, -100, 100, -100, -100, 100, -100,
-            100,
+            100, -100, 100, -100, -100, 100, -100, 100, 100, -100, 100, -100, -100, 100, -100, 100,
         ];
         let coeffs = forward_dct_4x4(&original);
         let recovered = inverse_dct_4x4(&coeffs);
@@ -1096,11 +1117,18 @@ mod tests {
         let fwd = forward_transform_4x4(&input, TxType::AdstAdst);
         assert_eq!(fwd, [0i32; 16]);
 
-        let signal: [i32; 16] = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160];
+        let signal: [i32; 16] = [
+            10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160,
+        ];
         let fwd = forward_transform_4x4(&signal, TxType::AdstAdst);
         let inv = inverse_transform_4x4(&fwd, TxType::AdstAdst);
         for i in 0..16 {
-            assert!((signal[i] - inv[i]).abs() <= 1, "mismatch at {i}: {} vs {}", signal[i], inv[i]);
+            assert!(
+                (signal[i] - inv[i]).abs() <= 1,
+                "mismatch at {i}: {} vs {}",
+                signal[i],
+                inv[i]
+            );
         }
     }
 
@@ -1111,51 +1139,82 @@ mod tests {
         assert_eq!(fwd, [0i32; 64]);
 
         let mut signal = [0i32; 64];
-        for i in 0..64 { signal[i] = (i as i32) * 3 - 90; }
+        for i in 0..64 {
+            signal[i] = (i as i32) * 3 - 90;
+        }
         let fwd = forward_transform_8x8(&signal, TxType::AdstAdst);
         let inv = inverse_transform_8x8(&fwd, TxType::AdstAdst);
         for i in 0..64 {
-            assert!((signal[i] - inv[i]).abs() <= 2, "mismatch at {i}: {} vs {}", signal[i], inv[i]);
+            assert!(
+                (signal[i] - inv[i]).abs() <= 2,
+                "mismatch at {i}: {} vs {}",
+                signal[i],
+                inv[i]
+            );
         }
     }
 
     #[test]
     fn identity4_round_trip() {
-        let signal: [i32; 16] = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160];
+        let signal: [i32; 16] = [
+            10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160,
+        ];
         let fwd = forward_transform_4x4(&signal, TxType::Idtx);
         let inv = inverse_transform_4x4(&fwd, TxType::Idtx);
         for i in 0..16 {
-            assert!((signal[i] - inv[i]).abs() <= 1, "mismatch at {i}: {} vs {}", signal[i], inv[i]);
+            assert!(
+                (signal[i] - inv[i]).abs() <= 1,
+                "mismatch at {i}: {} vs {}",
+                signal[i],
+                inv[i]
+            );
         }
     }
 
     #[test]
     fn identity8_round_trip() {
         let mut signal = [0i32; 64];
-        for i in 0..64 { signal[i] = (i as i32) * 2 - 60; }
+        for i in 0..64 {
+            signal[i] = (i as i32) * 2 - 60;
+        }
         let fwd = forward_transform_8x8(&signal, TxType::Idtx);
         let inv = inverse_transform_8x8(&fwd, TxType::Idtx);
         for i in 0..64 {
-            assert!((signal[i] - inv[i]).abs() <= 2, "mismatch at {i}: {} vs {}", signal[i], inv[i]);
+            assert!(
+                (signal[i] - inv[i]).abs() <= 2,
+                "mismatch at {i}: {} vs {}",
+                signal[i],
+                inv[i]
+            );
         }
     }
 
     #[test]
     fn mixed_adst_dct_round_trip() {
         let mut signal = [0i32; 64];
-        for i in 0..64 { signal[i] = (i as i32) * 3 - 90; }
+        for i in 0..64 {
+            signal[i] = (i as i32) * 3 - 90;
+        }
         for tx in [TxType::AdstDct, TxType::DctAdst] {
             let fwd = forward_transform_8x8(&signal, tx);
             let inv = inverse_transform_8x8(&fwd, tx);
             for i in 0..64 {
-                assert!((signal[i] - inv[i]).abs() <= 2, "mismatch at {i} for {:?}: {} vs {}", tx, signal[i], inv[i]);
+                assert!(
+                    (signal[i] - inv[i]).abs() <= 2,
+                    "mismatch at {i} for {:?}: {} vs {}",
+                    tx,
+                    signal[i],
+                    inv[i]
+                );
             }
         }
     }
 
     #[test]
     fn dct_delegation_unchanged() {
-        let signal: [i32; 16] = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160];
+        let signal: [i32; 16] = [
+            10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160,
+        ];
         let old = forward_dct_4x4(&signal);
         let new = forward_transform_4x4(&signal, TxType::DctDct);
         assert_eq!(old, new);
@@ -1185,7 +1244,9 @@ mod tests {
             assert!(
                 (rec - orig).abs() <= 2,
                 "pixel {} differs: original={}, recovered={}",
-                i, orig, rec
+                i,
+                orig,
+                rec
             );
         }
     }

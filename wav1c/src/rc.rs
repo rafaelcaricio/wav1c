@@ -29,13 +29,7 @@ fn initial_qp_from_bitrate(target_bitrate: u64, fps: f64, width: u32, height: u3
 }
 
 impl RateControl {
-    pub fn new(
-        target_bitrate: u64,
-        fps: f64,
-        width: u32,
-        height: u32,
-        keyint: usize,
-    ) -> Self {
+    pub fn new(target_bitrate: u64, fps: f64, width: u32, height: u32, keyint: usize) -> Self {
         let initial_qp = initial_qp_from_bitrate(target_bitrate, fps, width, height);
         let target_bits_per_frame = target_bitrate as f64 / fps;
         let buffer_size = target_bitrate as f64;
@@ -78,7 +72,8 @@ impl RateControl {
         let target_bits = self.target_bits_for_frame(is_keyframe);
 
         let buffer_target = self.buffer_size / 2.0;
-        let buffer_error = ((self.buffer_fullness - buffer_target) / buffer_target).clamp(-1.0, 1.0);
+        let buffer_error =
+            ((self.buffer_fullness - buffer_target) / buffer_target).clamp(-1.0, 1.0);
 
         let rate_error = if self.avg_frame_bits > 0.0 {
             ((self.avg_frame_bits - target_bits) / target_bits).clamp(-1.0, 1.0)

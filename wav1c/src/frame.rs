@@ -189,13 +189,24 @@ pub fn encode_inter_frame_with_recon(
     w.write_bits(refresh_frame_flags as u64, 8);
 
     // Write the 7 reference frame indices. Ref 0 is LAST_FRAME, Ref 1 is LAST2_FRAME... Ref 6 is ALTREF_FRAME
-    // We will assign LAST_FRAME to ref_slot and BWDREF_FRAME to bwd_ref_slot if we have a forward reference.
-    for _ in 0..7 {
-        w.write_bits(ref_slot as u64, 3);
+    // AV1 Ref frames:
+    // 0: LAST_FRAME
+    // 1: LAST2_FRAME
+    // 2: LAST3_FRAME
+    // 3: GOLDEN_FRAME
+    // 4: BWDREF_FRAME
+    // 5: ALTREF2_FRAME
+    // 6: ALTREF_FRAME
+    for i in 0..7 {
+        if i >= 4 {
+            w.write_bits(bwd_ref_slot as u64, 3);
+        } else {
+            w.write_bits(ref_slot as u64, 3);
+        }
     }
 
     w.write_bit(false); // frame_size_override_flag
-    
+
     w.write_bit(false); // render_and_frame_size_different
     w.write_bit(false); // is_filter_switchable
     w.write_bits(0, 2); // interpolation_filter
@@ -221,7 +232,13 @@ pub fn encode_inter_frame_with_recon(
     }
 
     let mut header_bytes = w.finalize();
-    let (tile_data, mut recon) = crate::tile::encode_inter_tile_with_recon(pixels, reference, forward_reference, dq, base_q_idx);
+    let (tile_data, mut recon) = crate::tile::encode_inter_tile_with_recon(
+        pixels,
+        reference,
+        forward_reference,
+        dq,
+        base_q_idx,
+    );
 
     let (damping_minus_3, y_strength, _uv_strength) = cdef_strength_for_qidx(base_q_idx);
     crate::cdef::apply_cdef_frame(

@@ -2,9 +2,9 @@
 
 use std::ptr;
 
+use wav1c::EncoderConfig;
 use wav1c::packet::FrameType;
 use wav1c::y4m::FramePixels;
-use wav1c::EncoderConfig;
 
 pub struct Wav1cEncoder {
     inner: wav1c::Encoder,
@@ -106,8 +106,16 @@ pub unsafe extern "C" fn wav1c_encoder_send_frame(
     let height = enc.inner.height() as usize;
     let uv_w = width.div_ceil(2);
     let uv_h = height.div_ceil(2);
-    let y_stride = if y_stride > 0 { y_stride as usize } else { width };
-    let uv_stride = if uv_stride > 0 { uv_stride as usize } else { uv_w };
+    let y_stride = if y_stride > 0 {
+        y_stride as usize
+    } else {
+        width
+    };
+    let uv_stride = if uv_stride > 0 {
+        uv_stride as usize
+    } else {
+        uv_w
+    };
 
     let y_plane = if y_stride == width {
         unsafe { std::slice::from_raw_parts(y, y_len) }.to_vec()
@@ -157,9 +165,7 @@ pub unsafe extern "C" fn wav1c_encoder_send_frame(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn wav1c_encoder_receive_packet(
-    enc: *mut Wav1cEncoder,
-) -> *mut Wav1cPacket {
+pub unsafe extern "C" fn wav1c_encoder_receive_packet(enc: *mut Wav1cEncoder) -> *mut Wav1cPacket {
     if enc.is_null() {
         return ptr::null_mut();
     }

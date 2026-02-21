@@ -12,8 +12,8 @@ pub mod ivf;
 pub mod msac;
 pub mod obu;
 pub mod packet;
-pub mod rdo;
 pub mod rc;
+pub mod rdo;
 pub mod satd;
 pub mod sequence;
 pub mod tile;
@@ -53,10 +53,7 @@ pub fn encode_av1_ivf_multi(frames: &[y4m::FramePixels]) -> Vec<u8> {
     encode(frames, &EncodeConfig::default())
 }
 
-pub fn encode_av1_ivf_multi_with_quality(
-    frames: &[y4m::FramePixels],
-    base_q_idx: u8,
-) -> Vec<u8> {
+pub fn encode_av1_ivf_multi_with_quality(frames: &[y4m::FramePixels], base_q_idx: u8) -> Vec<u8> {
     encode(
         frames,
         &EncodeConfig {
@@ -83,7 +80,13 @@ pub fn encode(frames: &[y4m::FramePixels], config: &EncodeConfig) -> Vec<u8> {
         .expect("invalid encoder dimensions");
 
     let mut output = Vec::new();
-    ivf::write_ivf_header(&mut output, width as u16, height as u16, frames.len() as u32).unwrap();
+    ivf::write_ivf_header(
+        &mut output,
+        width as u16,
+        height as u16,
+        frames.len() as u32,
+    )
+    .unwrap();
 
     for pixels in frames {
         enc.send_frame(pixels).expect("send_frame failed");

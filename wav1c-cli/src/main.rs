@@ -143,12 +143,11 @@ fn main() {
     let cli = parse_cli();
 
     let frames = match &cli.input {
-        InputMode::Y4m(path) => {
-            wav1c::y4m::FramePixels::all_from_y4m_file(Path::new(path)).unwrap_or_else(|e| {
+        InputMode::Y4m(path) => wav1c::y4m::FramePixels::all_from_y4m_file(Path::new(path))
+            .unwrap_or_else(|e| {
                 eprintln!("Error reading {}: {}", path, e);
                 process::exit(1);
-            })
-        }
+            }),
         InputMode::Solid {
             width,
             height,
@@ -167,8 +166,13 @@ fn main() {
     });
 
     let mut output = Vec::new();
-    wav1c::ivf::write_ivf_header(&mut output, width as u16, height as u16, frames.len() as u32)
-        .unwrap();
+    wav1c::ivf::write_ivf_header(
+        &mut output,
+        width as u16,
+        height as u16,
+        frames.len() as u32,
+    )
+    .unwrap();
 
     for frame in &frames {
         encoder.send_frame(frame).unwrap_or_else(|e| {
@@ -201,7 +205,9 @@ fn main() {
         };
         eprintln!(
             "frame {:>4}  {:>5}  {} bytes",
-            packet.frame_number, frame_type_str, packet.data.len()
+            packet.frame_number,
+            frame_type_str,
+            packet.data.len()
         );
         wav1c::ivf::write_ivf_frame(&mut output, packet.frame_number, &packet.data).unwrap();
     }

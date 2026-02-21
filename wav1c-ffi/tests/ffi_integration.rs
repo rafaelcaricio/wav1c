@@ -3,8 +3,8 @@ use std::process::Command;
 use std::ptr;
 
 use wav1c_ffi::{
-    wav1c_encoder_flush, wav1c_encoder_free, wav1c_encoder_headers, wav1c_encoder_new,
-    wav1c_encoder_receive_packet, wav1c_encoder_send_frame, wav1c_packet_free, Wav1cConfig,
+    Wav1cConfig, wav1c_encoder_flush, wav1c_encoder_free, wav1c_encoder_headers, wav1c_encoder_new,
+    wav1c_encoder_receive_packet, wav1c_encoder_send_frame, wav1c_packet_free,
 };
 
 fn dav1d_path() -> Option<std::path::PathBuf> {

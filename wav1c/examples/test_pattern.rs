@@ -17,7 +17,8 @@ fn find_dav1d() -> Option<std::path::PathBuf> {
         }
     }
 
-    let local = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dav1d/build/tools/dav1d");
+    let local =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dav1d/build/tools/dav1d");
     if local.exists() {
         return Some(local);
     }
@@ -72,7 +73,9 @@ fn main() {
     });
 
     test_pattern(&dav1d, "failing_pattern", 320, 240, |col, row| {
-        let y = ((row % 256) as u8).wrapping_add((col % 64) as u8).wrapping_mul(3);
+        let y = ((row % 256) as u8)
+            .wrapping_add((col % 64) as u8)
+            .wrapping_mul(3);
         (y, 128, 128)
     });
 
@@ -90,14 +93,22 @@ fn main() {
     });
 
     test_pattern(&dav1d, "complex_640x480", 640, 480, |col, row| {
-        let y = ((row % 256) as u8).wrapping_add((col % 64) as u8).wrapping_mul(3);
+        let y = ((row % 256) as u8)
+            .wrapping_add((col % 64) as u8)
+            .wrapping_mul(3);
         let u = ((col * 256 / 640) as u8).min(255);
         let v = ((row * 256 / 480) as u8).min(255);
         (y, u, v)
     });
 }
 
-fn test_pattern(dav1d: &std::path::Path, name: &str, w: u32, h: u32, f: impl Fn(u32, u32) -> (u8, u8, u8)) {
+fn test_pattern(
+    dav1d: &std::path::Path,
+    name: &str,
+    w: u32,
+    h: u32,
+    f: impl Fn(u32, u32) -> (u8, u8, u8),
+) {
     let y4m_data = create_test_y4m(w, h, f);
     let pixels = FramePixels::from_y4m(&y4m_data);
     let output = wav1c::encode_av1_ivf_y4m(&pixels);
@@ -107,12 +118,31 @@ fn test_pattern(dav1d: &std::path::Path, name: &str, w: u32, h: u32, f: impl Fn(
     std::fs::write(&ivf_path, &output).unwrap();
 
     let result = std::process::Command::new(dav1d)
-        .args(["-i", ivf_path.to_str().unwrap(), "-o", y4m_path.to_str().unwrap()])
+        .args([
+            "-i",
+            ivf_path.to_str().unwrap(),
+            "-o",
+            y4m_path.to_str().unwrap(),
+        ])
         .output()
         .expect("Failed to run dav1d");
 
     let stderr = String::from_utf8_lossy(&result.stderr);
-    let status = if result.status.success() { "PASS" } else { "FAIL" };
-    eprintln!("[{}] {} ({}x{}): {}", status, name, w, h,
-              if result.status.success() { "decoded OK".to_string() } else { stderr.to_string() });
+    let status = if result.status.success() {
+        "PASS"
+    } else {
+        "FAIL"
+    };
+    eprintln!(
+        "[{}] {} ({}x{}): {}",
+        status,
+        name,
+        w,
+        h,
+        if result.status.success() {
+            "decoded OK".to_string()
+        } else {
+            stderr.to_string()
+        }
+    );
 }

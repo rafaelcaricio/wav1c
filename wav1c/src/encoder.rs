@@ -1,3 +1,4 @@
+use crate::EncodeConfig;
 use crate::dequant;
 use crate::error::EncoderError;
 use crate::frame;
@@ -6,7 +7,6 @@ use crate::packet::{FrameType, Packet};
 use crate::rc::RateControl;
 use crate::sequence;
 use crate::y4m::FramePixels;
-use crate::EncodeConfig;
 
 #[derive(Debug)]
 pub struct EncoderConfig {
@@ -39,17 +39,16 @@ pub struct Encoder {
     frame_index: u64,
     rate_ctrl: Option<RateControl>,
     reference: Option<FramePixels>,
-    
+
     // Tracks monotonically increasing IVF timestamps
-    dts_index: u64,
-    
+
     // Ping-pong buffer index for reference frames (0 and 1)
     base_slot: u8,
 
     // Mini-GOP Buffering
     // Stores (frame_index, frame_pixels)
     gop_queue: Vec<(u64, FramePixels)>,
-    
+
     // Output queue
     pending_packets: std::collections::VecDeque<Packet>,
 }
@@ -60,9 +59,9 @@ impl Encoder {
             return Err(EncoderError::InvalidDimensions { width, height });
         }
 
-        let rate_ctrl = config.target_bitrate.map(|bitrate| {
-            RateControl::new(bitrate, config.fps, width, height, config.keyint)
-        });
+        let rate_ctrl = config
+            .target_bitrate
+            .map(|bitrate| RateControl::new(bitrate, config.fps, width, height, config.keyint));
 
         Ok(Self {
             config,
@@ -71,7 +70,6 @@ impl Encoder {
             frame_index: 0,
             rate_ctrl,
             reference: None,
-            dts_index: 0,
             base_slot: 0,
             gop_queue: Vec::with_capacity(4),
             pending_packets: std::collections::VecDeque::new(),
@@ -114,20 +112,51 @@ impl Encoder {
     }
 
     fn encode_single_frame(
-        &mut self, 
-        index: u64, 
-        pixels: &FramePixels, 
+        &mut self,
+        index: u64,
+        pixels: &FramePixels,
         fwd_ref: Option<&FramePixels>,
         refresh_frame_flags: u8,
         ref_slot: u8,
         bwd_ref_slot: u8,
         show_frame: bool,
     ) -> (Packet, FramePixels) {
-        let is_keyframe = index == 0 || (self.config.keyint > 0 && index.is_multiple_of(self.config.keyint as u64)) || self.reference.is_none();
+        self.encode_single_frame_qidx(
+            index,
+            pixels,
+            fwd_ref,
+            refresh_frame_flags,
+            ref_slot,
+            bwd_ref_slot,
+            show_frame,
+            None,
+            true,
+        )
+    }
 
-        let base_q_idx = match &mut self.rate_ctrl {
-            Some(rc) => rc.compute_qp(is_keyframe),
-            None => self.config.base_q_idx,
+    fn encode_single_frame_qidx(
+        &mut self,
+        index: u64,
+        pixels: &FramePixels,
+        fwd_ref: Option<&FramePixels>,
+        refresh_frame_flags: u8,
+        ref_slot: u8,
+        bwd_ref_slot: u8,
+        show_frame: bool,
+        override_q_idx: Option<u8>,
+        emit_tu_headers: bool,
+    ) -> (Packet, FramePixels) {
+        let is_keyframe = index == 0
+            || (self.config.keyint > 0 && index.is_multiple_of(self.config.keyint as u64))
+            || self.reference.is_none();
+
+        let base_q_idx = if let Some(q) = override_q_idx {
+            q
+        } else {
+            match &mut self.rate_ctrl {
+                Some(rc) => rc.compute_qp(is_keyframe),
+                None => self.config.base_q_idx,
+            }
         };
         let dq = dequant::lookup_dequant(base_q_idx);
 
@@ -159,13 +188,19 @@ impl Encoder {
         }
 
         let mut data = Vec::new();
-        data.extend_from_slice(&td);
-        data.extend_from_slice(&seq);
+        if emit_tu_headers {
+            data.extend_from_slice(&td);
+            data.extend_from_slice(&seq);
+        }
         data.extend_from_slice(&frm);
 
         let packet = Packet {
             data,
-            frame_type: if is_keyframe { FrameType::Key } else { FrameType::Inter },
+            frame_type: if is_keyframe {
+                FrameType::Key
+            } else {
+                FrameType::Inter
+            },
             frame_number: index,
         };
 
@@ -182,12 +217,13 @@ impl Encoder {
         if !self.config.b_frames {
             while !self.gop_queue.is_empty() {
                 let (idx, pixels) = self.gop_queue.remove(0);
-                let (mut pkt, recon) = self.encode_single_frame(
-                    idx, &pixels, None, 0xFF, 0, 0, true,
-                );
+                let (mut pkt, recon) =
+                    self.encode_single_frame(idx, &pixels, None, 0xFF, 0, 0, true);
                 self.reference = Some(recon);
-                pkt.frame_number = self.dts_index;
-                self.dts_index += 1;
+
+                // P-Only Output: Map exactly to the frame index (PTS)
+                pkt.frame_number = idx;
+
                 self.pending_packets.push_back(pkt);
             }
             return;
@@ -196,10 +232,13 @@ impl Encoder {
         if self.gop_queue.len() == 1 {
             let (idx, pixels) = self.gop_queue.remove(0);
             self.base_slot = 0;
-            let (mut pkt, recon) = self.encode_single_frame(idx, &pixels, None, 1 << self.base_slot, 0, 0, true);
+            let (mut pkt, recon) =
+                self.encode_single_frame(idx, &pixels, None, 1 << self.base_slot, 0, 0, true);
             self.reference = Some(recon);
-            pkt.frame_number = self.dts_index;
-            self.dts_index += 1;
+
+            // Single Fragment Output: Map exactly to the frame index (PTS)
+            pkt.frame_number = idx;
+
             self.pending_packets.push_back(pkt);
             return;
         }
@@ -209,71 +248,116 @@ impl Encoder {
         let mut base_packets = Vec::new();
         while !self.gop_queue.is_empty() {
             let (first_idx, _) = &self.gop_queue[0];
-            let is_keyframe = *first_idx == 0 || (self.config.keyint > 0 && first_idx.is_multiple_of(self.config.keyint as u64)) || self.reference.is_none();
-            
+            let is_keyframe = *first_idx == 0
+                || (self.config.keyint > 0 && first_idx.is_multiple_of(self.config.keyint as u64))
+                || self.reference.is_none();
+
             if is_keyframe {
                 let (idx, pixels) = self.gop_queue.remove(0);
                 self.base_slot = 0; // Reset ping-pong on keyframe
-                let (mut pkt, recon) = self.encode_single_frame(idx, &pixels, None, 1 << self.base_slot, 0, 0, true);
+                let (mut pkt, recon) =
+                    self.encode_single_frame(idx, &pixels, None, 1 << self.base_slot, 0, 0, true);
                 self.reference = Some(recon);
-                pkt.frame_number = self.dts_index;
-                self.dts_index += 1;
+
+                // Keyframe Output: Map exactly to the frame index (PTS)
+                pkt.frame_number = idx;
+
                 base_packets.push(pkt);
             } else {
                 break;
             }
         }
 
+        // Output the base packets (e.g. keyframes) that were just encoded
+        for pkt in base_packets {
+            self.pending_packets.push_back(pkt);
+        }
+
         if self.gop_queue.is_empty() {
-            for pkt in base_packets {
-                self.pending_packets.push_back(pkt);
-            }
             return;
         }
 
         // For the remaining GOP frames, encode the LAST frame (future reference) as a standard P-Frame
         let last_idx = self.gop_queue.len() - 1;
         let (f_idx, f_pixels) = self.gop_queue.remove(last_idx);
-        
+
         // P-Frame writes to the alt slot
         let alt_slot = 1 - self.base_slot;
         // P-Frame is NOT shown immediately
-        let (mut p_pkt, fwd_recon) = self.encode_single_frame(f_idx, &f_pixels, None, 1 << alt_slot, self.base_slot, alt_slot, false);
+        let (mut p_pkt, fwd_recon) = self.encode_single_frame(
+            f_idx,
+            &f_pixels,
+            None,
+            1 << alt_slot,
+            self.base_slot,
+            alt_slot,
+            false,
+        );
 
         // Encode intermediate frames as B-frames
         let mut b_packets = Vec::new();
+        let b_frame_q_idx = self.config.base_q_idx.saturating_add(16); // Lower quality for B-frames to save bits
         while !self.gop_queue.is_empty() {
             let (idx, b_pixels) = self.gop_queue.remove(0);
             // They use the newly created fwd_recon as their future reference
             // B-Frames do not refresh any slots (0x00) and ARE shown immediately
-            let (mut b_pkt, _) = self.encode_single_frame(idx, &b_pixels, Some(&fwd_recon), 0x00, self.base_slot, alt_slot, true);
+            let (mut b_pkt, _) = self.encode_single_frame_qidx(
+                idx,
+                &b_pixels,
+                Some(&fwd_recon),
+                0x00,
+                self.base_slot,
+                alt_slot,
+                true,
+                Some(b_frame_q_idx),
+                false,
+            );
             b_packets.push(b_pkt);
         }
 
-        // The decoder expects frames in display order to be reordered temporarily, but we are 
+        // The decoder expects frames in display order to be reordered temporarily, but we are
         // writing IVF which strictly expects decode order.
         // So we output the P-frame *first*, then the B-frames that depend on it.
         // Note: Real AV1 uses `show_existing_frame` flags for display ordering. Our simple payload will write P then B.
-        // Wait, IVF players expect presentation order to match file order. 
+        // Wait, IVF players expect presentation order to match file order.
         // Because we don't write `show_existing_frame` OBU packets yet, we cannot actually reorder the bitstream.
         // We will output them in display order (B then P) but pass the future reference into the B-frame encoder perfectly.
-        
-        // Actually, if we output B then P, the decoder hasn't seen P yet to decode B! 
+
+        // Actually, if we output B then P, the decoder hasn't seen P yet to decode B!
         // We *MUST* write P then B, and then write an empty `show_existing_frame=P` packet.
         // For now, to keep the test simple and valid, we will output in strict decode order.
-        
-        for pkt in base_packets {
-            self.pending_packets.push_back(pkt);
+
+        if !b_packets.is_empty() {
+            let mut first_b = b_packets.remove(0);
+
+            // The P-frame has TU headers [TD, SEQ].
+            // The B-frame has NO TU headers (because we passed emit_tu_headers=false).
+            // We concatenate P-frame data with B-frame data, creating a single chunk (TU) with TWO frames!
+            let mut combined_data = p_pkt.data;
+            combined_data.extend_from_slice(&first_b.data);
+
+            first_b.data = combined_data;
+            // The display order is first_b.frame_number. So this combined packet has the DTS/PTS of the B-frame!
+            self.pending_packets.push_back(first_b);
+        } else {
+            // If no B-frames (e.g. gop size was reached exactly?), just push the P-frame.
+            // But P-frames are only created if gop_queue.is_empty() is false, so B-frames exist.
+            self.pending_packets.push_back(p_pkt);
         }
-        
-        // Output P-frame (future reference) FIRST — decode order requires it before B-frames.
-        // Use the original frame index as the IVF timestamp (display order).
-        p_pkt.frame_number = f_idx;
-        self.pending_packets.push_back(p_pkt);
-        
-        // Then output B-frames with their original display-order indices
+
+        // Then output remaining B-frames with their original display-order indices
+        // Since they had emit_tu_headers=false, we MUST prepend TU headers to them!
         for mut b_pkt in b_packets {
-            // b_pkt.frame_number is already set to the original index by encode_single_frame
+            let td = obu::obu_wrap(obu::ObuType::TemporalDelimiter, &[]);
+            let seq = obu::obu_wrap(
+                obu::ObuType::SequenceHeader,
+                &sequence::encode_sequence_header(self.width, self.height),
+            );
+            let mut tu_data = Vec::new();
+            tu_data.extend_from_slice(&td);
+            tu_data.extend_from_slice(&seq);
+            tu_data.extend_from_slice(&b_pkt.data);
+            b_pkt.data = tu_data;
             self.pending_packets.push_back(b_pkt);
         }
 
@@ -283,8 +367,11 @@ impl Encoder {
             obu::ObuType::SequenceHeader,
             &sequence::encode_sequence_header(self.width, self.height),
         );
-        let show_hdr = obu::obu_wrap(obu::ObuType::FrameHeader, &frame::encode_show_existing_frame(alt_slot));
-        
+        let show_hdr = obu::obu_wrap(
+            obu::ObuType::FrameHeader,
+            &frame::encode_show_existing_frame(alt_slot),
+        );
+
         let mut show_pkt_data = Vec::new();
         show_pkt_data.extend_from_slice(&td);
         show_pkt_data.extend_from_slice(&seq);
@@ -483,7 +570,7 @@ mod tests {
         enc.send_frame(&frame).unwrap();
         enc.send_frame(&frame).unwrap();
         enc.flush();
-        
+
         // We expect Frame 0 (Key), then Frame 1 (P-frame, emitted as end of GOP=1)
         let _key_packet = enc.receive_packet().unwrap();
         let packet = enc.receive_packet().unwrap();
@@ -522,7 +609,7 @@ mod tests {
         while let Some(packet) = enc.receive_packet() {
             actual_types.push((packet.frame_number, packet.frame_type));
         }
-        // Since GOP emits out of order (P then B), we sort by frame number to verify correctness 
+        // Since GOP emits out of order (P then B), we sort by frame number to verify correctness
         actual_types.sort_by_key(|a| a.0);
 
         for (i, expected) in expected_types.iter().enumerate() {
@@ -658,7 +745,7 @@ mod tests {
             actual_nums.push(packet.frame_number);
         }
         actual_nums.sort_unstable();
-        
+
         for expected_num in 0..5u64 {
             assert_eq!(actual_nums[expected_num as usize], expected_num);
         }

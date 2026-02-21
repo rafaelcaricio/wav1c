@@ -40,7 +40,7 @@ pub fn cdef_analyze_direction(src: &[u8], stride: usize, bw: usize, bh: usize) -
                 let nx1 = x as i32 + dx;
                 let ny2 = y as i32 - dy;
                 let nx2 = x as i32 - dx;
-                
+
                 if ny1 >= 0 && ny1 < bh as i32 && nx1 >= 0 && nx1 < bw as i32 {
                     let p1 = src[ny1 as usize * stride + nx1 as usize] as i32;
                     cost[dir] += (p - p1).pow(2);
@@ -52,7 +52,7 @@ pub fn cdef_analyze_direction(src: &[u8], stride: usize, bw: usize, bh: usize) -
             }
         }
     }
-    
+
     let mut best_dir = 0;
     let mut min_cost = i32::MAX;
     for (dir, &c) in cost.iter().enumerate() {
@@ -87,7 +87,7 @@ pub fn cdef_filter_block(
     let dir = cdef_analyze_direction(src, stride, width, height);
     let pri_taps = &CDEF_PRI_TAPS[(pri_strength == 0) as usize];
     let sec_taps = &CDEF_SEC_TAPS[(pri_strength == 0) as usize];
-    
+
     let dir1 = dir as usize;
     let dir2 = (dir as usize + 2) & 7;
     let dir3 = (dir as usize + 6) & 7;
@@ -168,7 +168,7 @@ pub fn apply_cdef_frame(
         for bx in (0..width).step_by(8) {
             let bw = (8).min(width - bx);
             let bh = (8).min(height - by);
-            
+
             cdef_filter_block(
                 &pixels.y[by * width + bx..],
                 width,
@@ -187,7 +187,7 @@ pub fn apply_cdef_frame(
         for bx in (0..uv_w).step_by(4) {
             let bw = (4).min(uv_w - bx);
             let bh = (4).min(uv_h - by);
-            
+
             cdef_filter_block(
                 &pixels.u[by * uv_w + bx..],
                 uv_w,
@@ -199,7 +199,7 @@ pub fn apply_cdef_frame(
                 sec_strength,
                 damping,
             );
-            
+
             cdef_filter_block(
                 &pixels.v[by * uv_w + bx..],
                 uv_w,

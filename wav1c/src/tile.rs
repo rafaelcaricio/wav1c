@@ -15,9 +15,7 @@ const PARTITION_CTX_NONE: [u8; 5] = [0, 0x10, 0x18, 0x1c, 0x1e];
 
 const PARTITION_NSYMS: [u32; 5] = [9, 9, 9, 9, 3];
 
-const INTRA_MODE_CONTEXT: [usize; 13] = [
-    0, 1, 2, 3, 4, 4, 4, 4, 3, 0, 1, 2, 0,
-];
+const INTRA_MODE_CONTEXT: [usize; 13] = [0, 1, 2, 3, 4, 4, 4, 4, 3, 0, 1, 2, 0];
 
 #[rustfmt::skip]
 const SM_WEIGHTS: [u8; 128] = [
@@ -162,7 +160,11 @@ fn get_lo_ctx(level: &[u8], stride: usize, x: usize, y: usize) -> (usize, u32) {
 
     let offset = LO_CTX_OFFSETS_2D[y.min(4)][x.min(4)] as usize;
 
-    let mag_ctx = if full_mag > 512 { 4 } else { ((full_mag + 64) >> 7) as usize };
+    let mag_ctx = if full_mag > 512 {
+        4
+    } else {
+        ((full_mag + 64) >> 7) as usize
+    };
     (offset + mag_ctx, hi_mag)
 }
 
@@ -190,9 +192,20 @@ fn coef_ctx_value(cul_level: u8, dc_sign_negative: bool, dc_is_zero: bool) -> u8
     cul_level | dc_sign_level
 }
 
-fn predict_dc(above: &[u8], left: &[u8], have_above: bool, have_left: bool, w: usize, h: usize) -> Vec<u8> {
+fn predict_dc(
+    above: &[u8],
+    left: &[u8],
+    have_above: bool,
+    have_left: bool,
+    w: usize,
+    h: usize,
+) -> Vec<u8> {
     let val = if have_above && have_left {
-        let sum: u32 = above[..w].iter().chain(left[..h].iter()).map(|&x| x as u32).sum();
+        let sum: u32 = above[..w]
+            .iter()
+            .chain(left[..h].iter())
+            .map(|&x| x as u32)
+            .sum();
         ((sum + (w + h) as u32 / 2) / (w + h) as u32) as u8
     } else if have_above {
         let sum: u32 = above[..w].iter().map(|&x| x as u32).sum();
@@ -305,8 +318,7 @@ fn predict_directional_z1(above: &[u8], w: usize, h: usize, dx: i32) -> Vec<u8> 
         let mut base = (xpos_row >> 6) as usize;
         for x in 0..w {
             if base < max_base_x {
-                let v = above[base] as i32 * (64 - frac)
-                    + above[base + 1] as i32 * frac;
+                let v = above[base] as i32 * (64 - frac) + above[base + 1] as i32 * frac;
                 out[y * w + x] = ((v + 32) >> 6).clamp(0, 255) as u8;
             } else {
                 for fill_x in x..w {
@@ -329,8 +341,7 @@ fn predict_directional_z3(left: &[u8], w: usize, h: usize, dy: i32) -> Vec<u8> {
         let mut base = (ypos_col >> 6) as usize;
         for y in 0..h {
             if base < max_base_y {
-                let v = left[base] as i32 * (64 - frac)
-                    + left[base + 1] as i32 * frac;
+                let v = left[base] as i32 * (64 - frac) + left[base + 1] as i32 * frac;
                 out[y * w + x] = ((v + 32) >> 6).clamp(0, 255) as u8;
             } else {
                 for fill_y in y..h {
@@ -346,8 +357,13 @@ fn predict_directional_z3(left: &[u8], w: usize, h: usize, dy: i32) -> Vec<u8> {
 
 #[allow(clippy::too_many_arguments)]
 fn predict_directional_z2(
-    above: &[u8], left: &[u8], top_left: u8,
-    w: usize, h: usize, dx: i32, dy: i32,
+    above: &[u8],
+    left: &[u8],
+    top_left: u8,
+    w: usize,
+    h: usize,
+    dx: i32,
+    dy: i32,
 ) -> Vec<u8> {
     let mut out = vec![0u8; w * h];
     let mut edge = vec![0u8; w + h + 1];
@@ -371,8 +387,7 @@ fn predict_directional_z2(
                 let bx = base_x as usize;
                 let idx = tl_idx + bx;
                 if idx + 1 < edge.len() {
-                    v = edge[idx] as i32 * (64 - frac_x)
-                        + edge[idx + 1] as i32 * frac_x;
+                    v = edge[idx] as i32 * (64 - frac_x) + edge[idx + 1] as i32 * frac_x;
                 } else {
                     v = edge[edge.len() - 1] as i32 * 64;
                 }
@@ -384,8 +399,7 @@ fn predict_directional_z2(
                     let by = base_y as usize;
                     let idx = tl_idx.wrapping_sub(1).wrapping_sub(by);
                     if idx < edge.len() && idx >= 1 {
-                        v = edge[idx] as i32 * (64 - frac_y)
-                            + edge[idx - 1] as i32 * frac_y;
+                        v = edge[idx] as i32 * (64 - frac_y) + edge[idx - 1] as i32 * frac_y;
                     } else if idx < edge.len() {
                         v = edge[idx] as i32 * 64;
                     } else {
@@ -406,8 +420,14 @@ const MODE_TO_ANGLE: [i32; 8] = [90, 180, 45, 135, 113, 157, 203, 67];
 
 #[allow(clippy::too_many_arguments)]
 fn generate_directional_prediction(
-    angle: i32, above: &[u8], left: &[u8], top_left: u8,
-    have_above: bool, have_left: bool, w: usize, h: usize,
+    angle: i32,
+    above: &[u8],
+    left: &[u8],
+    top_left: u8,
+    have_above: bool,
+    have_left: bool,
+    w: usize,
+    h: usize,
 ) -> Vec<u8> {
     if angle <= 90 {
         if angle < 90 && have_above {
@@ -430,13 +450,22 @@ fn generate_directional_prediction(
 
 #[allow(clippy::too_many_arguments)]
 fn generate_prediction(
-    mode: u8, delta: i8, above: &[u8], left: &[u8], top_left: u8,
-    have_above: bool, have_left: bool, w: usize, h: usize,
+    mode: u8,
+    delta: i8,
+    above: &[u8],
+    left: &[u8],
+    top_left: u8,
+    have_above: bool,
+    have_left: bool,
+    w: usize,
+    h: usize,
 ) -> Vec<u8> {
     match mode {
         1..=8 => {
             let angle = MODE_TO_ANGLE[(mode - 1) as usize] + 3 * delta as i32;
-            generate_directional_prediction(angle, above, left, top_left, have_above, have_left, w, h)
+            generate_directional_prediction(
+                angle, above, left, top_left, have_above, have_left, w, h,
+            )
         }
         9 => predict_smooth(above, left, w, h),
         10 => predict_smooth_v(above, left, w, h),
@@ -448,12 +477,20 @@ fn generate_prediction(
 
 #[allow(dead_code)]
 fn compute_sad(source: &[u8], prediction: &[u8]) -> u32 {
-    source.iter().zip(prediction.iter())
+    source
+        .iter()
+        .zip(prediction.iter())
         .map(|(&s, &p)| (s as i32 - p as i32).unsigned_abs())
         .sum()
 }
 
-fn compute_rd_cost(source: &[u8], prediction: &[u8], dc_dq: u32, ac_dq: u32, tx_type: dct::TxType) -> u64 {
+fn compute_rd_cost(
+    source: &[u8],
+    prediction: &[u8],
+    dc_dq: u32,
+    ac_dq: u32,
+    tx_type: dct::TxType,
+) -> u64 {
     let mut residual = [0i32; 64];
     for i in 0..64 {
         residual[i] = source[i] as i32 - prediction[i] as i32;
@@ -499,40 +536,67 @@ fn select_best_intra_mode(
     // ac_dq is the AC quantization step size. For SATD, a linear scaling works well.
     let lambda = 0; // Fast RDO lambda
 
-
     let mut candidates = Vec::new();
 
     let dc_satd = crate::satd::compute_satd(source, &dc, w, h, w, w);
-    candidates.push((0, dc, crate::rdo::calculate_rd_cost(dc_satd, crate::rdo::estimate_intra_mode_bits(0), lambda)));
+    candidates.push((
+        0,
+        dc,
+        crate::rdo::calculate_rd_cost(dc_satd, crate::rdo::estimate_intra_mode_bits(0), lambda),
+    ));
 
     if have_above {
         let v = predict_v(above, w, h);
         let satd = crate::satd::compute_satd(source, &v, w, h, w, w);
-        candidates.push((1, v, crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(1), lambda)));
+        candidates.push((
+            1,
+            v,
+            crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(1), lambda),
+        ));
     }
 
     if have_left {
         let hp = predict_h(left, w, h);
         let satd = crate::satd::compute_satd(source, &hp, w, h, w, w);
-        candidates.push((2, hp, crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(2), lambda)));
+        candidates.push((
+            2,
+            hp,
+            crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(2), lambda),
+        ));
     }
 
     if have_above && have_left {
         let smooth = predict_smooth(above, left, w, h);
         let satd = crate::satd::compute_satd(source, &smooth, w, h, w, w);
-        candidates.push((9, smooth, crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(9), lambda)));
+        candidates.push((
+            9,
+            smooth,
+            crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(9), lambda),
+        ));
 
         let sv = predict_smooth_v(above, left, w, h);
         let satd = crate::satd::compute_satd(source, &sv, w, h, w, w);
-        candidates.push((10, sv, crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(10), lambda)));
+        candidates.push((
+            10,
+            sv,
+            crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(10), lambda),
+        ));
 
         let sh = predict_smooth_h(above, left, w, h);
         let satd = crate::satd::compute_satd(source, &sh, w, h, w, w);
-        candidates.push((11, sh, crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(11), lambda)));
+        candidates.push((
+            11,
+            sh,
+            crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(11), lambda),
+        ));
 
         let paeth = predict_paeth(above, left, top_left, w, h);
         let satd = crate::satd::compute_satd(source, &paeth, w, h, w, w);
-        candidates.push((12, paeth, crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(12), lambda)));
+        candidates.push((
+            12,
+            paeth,
+            crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(12), lambda),
+        ));
     }
 
     // Sort by Fast RDO cost
@@ -621,7 +685,11 @@ fn encode_transform_block(
                 256 => 2,
                 _ => 1,
             };
-            enc.encode_symbol(txtype_to_intra2_symbol(tx_type), &mut cdf.txtp_intra2[t_dim_min][y_mode as usize], 4);
+            enc.encode_symbol(
+                txtype_to_intra2_symbol(tx_type),
+                &mut cdf.txtp_intra2[t_dim_min][y_mode as usize],
+                4,
+            );
         }
     }
 
@@ -637,7 +705,10 @@ fn encode_transform_block(
     if eob_bin >= 2 {
         let extra_bits = eob_bin - 2;
         let hi_bit = (eob >> extra_bits) & 1;
-        enc.encode_bool(hi_bit != 0, &mut cdf.eob_hi_bit[t_dim_ctx][chroma_idx][eob_bin - 2]);
+        enc.encode_bool(
+            hi_bit != 0,
+            &mut cdf.eob_hi_bit[t_dim_ctx][chroma_idx][eob_bin - 2],
+        );
         for bit_idx in (0..extra_bits).rev() {
             enc.encode_bool_equi((eob >> bit_idx) & 1 != 0);
         }
@@ -663,8 +734,16 @@ fn encode_transform_block(
         let eob_rc = scan_table[eob] as usize;
         let eob_level = coeffs[eob_rc].unsigned_abs();
         let eob_tok = eob_level.min(3);
-        let eob_base = if eob_tok >= 3 { 2u32 } else { eob_tok.saturating_sub(1) };
-        enc.encode_symbol(eob_base, &mut cdf.eob_base_tok[t_dim_ctx][chroma_idx][eob_ctx], 2);
+        let eob_base = if eob_tok >= 3 {
+            2u32
+        } else {
+            eob_tok.saturating_sub(1)
+        };
+        enc.encode_symbol(
+            eob_base,
+            &mut cdf.eob_base_tok[t_dim_ctx][chroma_idx][eob_ctx],
+            2,
+        );
 
         if eob_level >= 3 {
             let eob_x = eob_rc % w;
@@ -674,9 +753,17 @@ fn encode_transform_block(
                 0
             } else {
                 (if (eob_y | eob_x) > 1 { 14 } else { 7 })
-                    + (if mag > 12 { 6 } else { ((mag + 1) >> 1) as usize })
+                    + (if mag > 12 {
+                        6
+                    } else {
+                        ((mag + 1) >> 1) as usize
+                    })
             };
-            encode_hi_tok(enc, &mut cdf.br_tok[t_dim_ctx.min(3)][chroma_idx][hi_ctx], eob_level);
+            encode_hi_tok(
+                enc,
+                &mut cdf.br_tok[t_dim_ctx.min(3)][chroma_idx][hi_ctx],
+                eob_level,
+            );
         }
 
         levels[eob_rc] = level_tok(eob_level);
@@ -695,8 +782,16 @@ fn encode_transform_block(
         if level >= 3 {
             let mag = get_hi_mag(&levels[rc..], stride) & 63;
             let hi_ctx = (if (y | x) > 1 { 14 } else { 7 })
-                + (if mag > 12 { 6 } else { ((mag + 1) >> 1) as usize });
-            encode_hi_tok(enc, &mut cdf.br_tok[t_dim_ctx.min(3)][chroma_idx][hi_ctx], level);
+                + (if mag > 12 {
+                    6
+                } else {
+                    ((mag + 1) >> 1) as usize
+                });
+            encode_hi_tok(
+                enc,
+                &mut cdf.br_tok[t_dim_ctx.min(3)][chroma_idx][hi_ctx],
+                level,
+            );
         }
 
         levels[rc] = level_tok(level);
@@ -710,8 +805,16 @@ fn encode_transform_block(
 
         if level >= 3 {
             let mag = get_hi_mag(&levels, stride) & 63;
-            let hi_ctx = if mag > 12 { 6 } else { ((mag + 1) >> 1) as usize };
-            encode_hi_tok(enc, &mut cdf.br_tok[t_dim_ctx.min(3)][chroma_idx][hi_ctx], level);
+            let hi_ctx = if mag > 12 {
+                6
+            } else {
+                ((mag + 1) >> 1) as usize
+            };
+            encode_hi_tok(
+                enc,
+                &mut cdf.br_tok[t_dim_ctx.min(3)][chroma_idx][hi_ctx],
+                level,
+            );
         }
 
         levels[0] = level_tok(level);
@@ -930,8 +1033,10 @@ fn subpel_refine(
         let int_y = px_y as i32 + (mv_y >> 3);
         let phase_x = (mv_x & 7) as u32;
         let phase_y = (mv_y & 7) as u32;
-        let pred = interpolate_block(reference, width, height, int_x, int_y, phase_x, phase_y, block_size);
-        
+        let pred = interpolate_block(
+            reference, width, height, int_x, int_y, phase_x, phase_y, block_size,
+        );
+
         let mut ssd = 0u64;
         for i in 0..src_block.len() {
             let diff = src_block[i] as i64 - pred[i] as i64;
@@ -946,8 +1051,14 @@ fn subpel_refine(
 
     for &step in &[4i32, 2] {
         for &(dx, dy) in &[
-            (-step, 0), (step, 0), (0, -step), (0, step),
-            (-step, -step), (-step, step), (step, -step), (step, step),
+            (-step, 0),
+            (step, 0),
+            (0, -step),
+            (0, step),
+            (-step, -step),
+            (-step, step),
+            (step, -step),
+            (step, step),
         ] {
             let cx = bx + dx;
             let cy = by + dy;
@@ -1265,13 +1376,7 @@ impl TileContext {
             } else {
                 &self.left_recon_v[..]
             };
-            (
-                above,
-                left,
-                (bx * 2) as usize,
-                ((by & 15) * 2) as usize,
-                bp,
-            )
+            (above, left, (bx * 2) as usize, ((by & 15) * 2) as usize, bp)
         };
 
         if have_top && have_left {
@@ -1370,16 +1475,10 @@ impl TileContext {
         let have_top = by > 0;
         let have_left = bx > 0;
 
-        let above_inter = have_top
-            && bx4 < self.above_intra.len()
-            && !self.above_intra[bx4];
+        let above_inter = have_top && bx4 < self.above_intra.len() && !self.above_intra[bx4];
         let left_inter = have_left && !self.left_intra[by4.min(31)];
 
-        if above_inter || left_inter {
-            2
-        } else {
-            1
-        }
+        if above_inter || left_inter { 2 } else { 1 }
     }
 
     fn has_inter_neighbor(&self, bx: u32, by: u32) -> bool {
@@ -1388,9 +1487,7 @@ impl TileContext {
         let have_top = by > 0;
         let have_left = bx > 0;
 
-        let above_inter = have_top
-            && bx4 < self.above_intra.len()
-            && !self.above_intra[bx4];
+        let above_inter = have_top && bx4 < self.above_intra.len() && !self.above_intra[bx4];
         let left_inter = have_left && !self.left_intra[by4.min(31)];
 
         above_inter || left_inter
@@ -1402,14 +1499,10 @@ impl TileContext {
         let have_top = by > 0;
         let have_left = bx > 0;
 
-        let above_inter = have_top
-            && bx4 < self.above_intra.len()
-            && !self.above_intra[bx4];
+        let above_inter = have_top && bx4 < self.above_intra.len() && !self.above_intra[bx4];
         let left_inter = have_left && !self.left_intra[by4.min(31)];
 
-        let above_is_newmv = above_inter
-            && bx4 < self.above_newmv.len()
-            && self.above_newmv[bx4];
+        let above_is_newmv = above_inter && bx4 < self.above_newmv.len() && self.above_newmv[bx4];
         let left_is_newmv = left_inter && self.left_newmv[by4.min(31)];
         let have_newmv = (above_is_newmv || left_is_newmv) as u32;
 
@@ -1505,7 +1598,15 @@ impl TileContext {
         }
     }
 
-    fn update_mode_ctx(&mut self, bx: u32, by: u32, bl: usize, mi_cols: u32, mi_rows: u32, mode: u8) {
+    fn update_mode_ctx(
+        &mut self,
+        bx: u32,
+        by: u32,
+        bl: usize,
+        mi_cols: u32,
+        mi_rows: u32,
+        mode: u8,
+    ) {
         let bx4 = bx as usize;
         let by4 = (by & 31) as usize;
         let bw4 = 2 * (16usize >> bl);
@@ -1591,7 +1692,8 @@ impl<'a> TileEncoder<'a> {
                 if have_above && idx < self.ctx.above_recon_y.len() {
                     self.ctx.above_recon_y[idx]
                 } else if have_above {
-                    self.ctx.above_recon_y[(px_x as usize + 7).min(self.ctx.above_recon_y.len() - 1)]
+                    self.ctx.above_recon_y
+                        [(px_x as usize + 7).min(self.ctx.above_recon_y.len() - 1)]
                 } else {
                     128
                 }
@@ -1621,13 +1723,19 @@ impl<'a> TileEncoder<'a> {
         let y_block = extract_block(&self.pixels.y, w, px_x, px_y, 8, w, h);
 
         let (y_mode, y_angle_delta) = select_best_intra_mode(
-            &y_block, &above_y, &left_y, top_left_y,
-            have_above, have_left, 8, 8,
-            self.dq.dc, self.dq.ac,
+            &y_block, &above_y, &left_y, top_left_y, have_above, have_left, 8, 8, self.dq.dc,
+            self.dq.ac,
         );
         let y_pred_block = generate_prediction(
-            y_mode, y_angle_delta, &above_y, &left_y, top_left_y,
-            have_above, have_left, 8, 8,
+            y_mode,
+            y_angle_delta,
+            &above_y,
+            &left_y,
+            top_left_y,
+            have_above,
+            have_left,
+            8,
+            8,
         );
         let y_txtype = select_best_txtype(&y_block, &y_pred_block, self.dq.dc, self.dq.ac);
 
@@ -1667,17 +1775,28 @@ impl<'a> TileEncoder<'a> {
         self.enc.encode_bool(is_skip, &mut self.cdf.skip[skip_ctx]);
 
         let (above_mode_ctx, left_mode_ctx) = self.ctx.mode_ctx(bx, by);
-        self.enc.encode_symbol(y_mode as u32, &mut self.cdf.kf_y_mode[above_mode_ctx][left_mode_ctx], 12);
+        self.enc.encode_symbol(
+            y_mode as u32,
+            &mut self.cdf.kf_y_mode[above_mode_ctx][left_mode_ctx],
+            12,
+        );
 
         if (1..=8).contains(&y_mode) {
-            self.enc.encode_symbol((y_angle_delta + 3) as u32, &mut self.cdf.angle_delta[(y_mode - 1) as usize], 6);
+            self.enc.encode_symbol(
+                (y_angle_delta + 3) as u32,
+                &mut self.cdf.angle_delta[(y_mode - 1) as usize],
+                6,
+            );
         }
 
         let cfl_allowed = bl >= 2;
         let uv_n_syms = if cfl_allowed { 13 } else { 12 };
         let cfl_idx = usize::from(cfl_allowed);
-        self.enc
-            .encode_symbol(0, &mut self.cdf.uv_mode[cfl_idx][y_mode as usize], uv_n_syms);
+        self.enc.encode_symbol(
+            0,
+            &mut self.cdf.uv_mode[cfl_idx][y_mode as usize],
+            uv_n_syms,
+        );
 
         let (y_cul, y_dc_neg, y_dc_zero);
         let (u_cul, u_dc_neg, u_dc_zero);
@@ -1762,7 +1881,9 @@ impl<'a> TileEncoder<'a> {
                 let dest_x = px_x + c;
                 let dest_y = px_y + r;
                 if dest_x < w && dest_y < h {
-                    let pixel = (y_pred_block[(r * 8 + c) as usize] as i32 + y_recon_residual[(r * 8 + c) as usize]).clamp(0, 255) as u8;
+                    let pixel = (y_pred_block[(r * 8 + c) as usize] as i32
+                        + y_recon_residual[(r * 8 + c) as usize])
+                        .clamp(0, 255) as u8;
                     self.recon.y[(dest_y * w + dest_x) as usize] = pixel;
                 }
             }
@@ -1778,7 +1899,8 @@ impl<'a> TileEncoder<'a> {
                 let dest_x = chroma_px_x + c;
                 let dest_y = chroma_px_y + r;
                 if dest_x < cw && dest_y < ch {
-                    let pixel = (u_pred as i32 + u_recon_residual[(r * 4 + c) as usize]).clamp(0, 255) as u8;
+                    let pixel = (u_pred as i32 + u_recon_residual[(r * 4 + c) as usize])
+                        .clamp(0, 255) as u8;
                     self.recon.u[(dest_y * cw + dest_x) as usize] = pixel;
                 }
             }
@@ -1794,7 +1916,8 @@ impl<'a> TileEncoder<'a> {
                 let dest_x = chroma_px_x + c;
                 let dest_y = chroma_px_y + r;
                 if dest_x < cw && dest_y < ch {
-                    let pixel = (v_pred as i32 + v_recon_residual[(r * 4 + c) as usize]).clamp(0, 255) as u8;
+                    let pixel = (v_pred as i32 + v_recon_residual[(r * 4 + c) as usize])
+                        .clamp(0, 255) as u8;
                     self.recon.v[(dest_y * cw + dest_x) as usize] = pixel;
                 }
             }
@@ -1880,7 +2003,8 @@ impl<'a> TileEncoder<'a> {
             .update_partition_ctx(bx, by, bl, self.mi_cols, self.mi_rows);
         self.ctx
             .update_skip_ctx(bx, by, bl, self.mi_cols, self.mi_rows, is_skip);
-        self.ctx.update_mode_ctx(bx, by, bl, self.mi_cols, self.mi_rows, y_mode);
+        self.ctx
+            .update_mode_ctx(bx, by, bl, self.mi_cols, self.mi_rows, y_mode);
     }
 
     fn encode_block_16x16(&mut self, bx: u32, by: u32) {
@@ -1918,8 +2042,7 @@ impl<'a> TileEncoder<'a> {
                 if have_left && idx < self.ctx.left_recon_y.len() {
                     self.ctx.left_recon_y[idx]
                 } else if have_left {
-                    self.ctx.left_recon_y
-                        [(left_local_py + 15).min(self.ctx.left_recon_y.len() - 1)]
+                    self.ctx.left_recon_y[(left_local_py + 15).min(self.ctx.left_recon_y.len() - 1)]
                 } else {
                     128
                 }
@@ -1935,15 +2058,7 @@ impl<'a> TileEncoder<'a> {
         let y_block = extract_block(&self.pixels.y, w, px_x, px_y, 16, w, h);
 
         let (y_mode, y_angle_delta) = select_best_intra_mode(
-            &y_block,
-            &above_y,
-            &left_y,
-            top_left_y,
-            have_above,
-            have_left,
-            16,
-            16,
-            self.dq.dc,
+            &y_block, &above_y, &left_y, top_left_y, have_above, have_left, 16, 16, self.dq.dc,
             self.dq.ac,
         );
         let y_pred_block = generate_prediction(
@@ -2012,8 +2127,11 @@ impl<'a> TileEncoder<'a> {
         let cfl_allowed = bl >= 2;
         let uv_n_syms = if cfl_allowed { 13 } else { 12 };
         let cfl_idx = usize::from(cfl_allowed);
-        self.enc
-            .encode_symbol(0, &mut self.cdf.uv_mode[cfl_idx][y_mode as usize], uv_n_syms);
+        self.enc.encode_symbol(
+            0,
+            &mut self.cdf.uv_mode[cfl_idx][y_mode as usize],
+            uv_n_syms,
+        );
 
         let (y_cul, y_dc_neg, y_dc_zero);
         let (u_cul, u_dc_neg, u_dc_zero);
@@ -2299,7 +2417,11 @@ impl<'a> TileEncoder<'a> {
         self.enc.encode_bool(true, &mut self.cdf.skip[skip_ctx]);
 
         let (above_mode_ctx, left_mode_ctx) = self.ctx.mode_ctx(bx, by);
-        self.enc.encode_symbol(0, &mut self.cdf.kf_y_mode[above_mode_ctx][left_mode_ctx], 12);
+        self.enc.encode_symbol(
+            0,
+            &mut self.cdf.kf_y_mode[above_mode_ctx][left_mode_ctx],
+            12,
+        );
 
         let cfl_allowed = bl >= 2;
         let uv_n_syms = if cfl_allowed { 13 } else { 12 };
@@ -2363,7 +2485,8 @@ impl<'a> TileEncoder<'a> {
             .update_partition_ctx(bx, by, bl, self.mi_cols, self.mi_rows);
         self.ctx
             .update_skip_ctx(bx, by, bl, self.mi_cols, self.mi_rows, true);
-        self.ctx.update_mode_ctx(bx, by, bl, self.mi_cols, self.mi_rows, 0);
+        self.ctx
+            .update_mode_ctx(bx, by, bl, self.mi_cols, self.mi_rows, 0);
     }
 
     fn encode_partition(&mut self, bl: usize, bx: u32, by: u32) {
@@ -2460,7 +2583,11 @@ pub fn encode_tile(pixels: &FramePixels) -> Vec<u8> {
     encode_tile_with_recon(pixels, dq, crate::DEFAULT_BASE_Q_IDX).0
 }
 
-pub fn encode_tile_with_recon(pixels: &FramePixels, dq: DequantValues, base_q_idx: u8) -> (Vec<u8>, FramePixels) {
+pub fn encode_tile_with_recon(
+    pixels: &FramePixels,
+    dq: DequantValues,
+    base_q_idx: u8,
+) -> (Vec<u8>, FramePixels) {
     let mut tile = TileEncoder::new(pixels, dq, base_q_idx);
 
     let sb_cols = tile.mi_cols.div_ceil(16);
@@ -2495,7 +2622,14 @@ struct InterTileEncoder<'a> {
 }
 
 impl<'a> InterTileEncoder<'a> {
-    fn new(pixels: &'a FramePixels, reference: &'a FramePixels, forward_reference: Option<&'a FramePixels>, dq: DequantValues, base_q_idx: u8, global_mv: (i32, i32)) -> Self {
+    fn new(
+        pixels: &'a FramePixels,
+        reference: &'a FramePixels,
+        forward_reference: Option<&'a FramePixels>,
+        dq: DequantValues,
+        base_q_idx: u8,
+        global_mv: (i32, i32),
+    ) -> Self {
         let mi_cols = 2 * pixels.width.div_ceil(8);
         let mi_rows = 2 * pixels.height.div_ceil(8);
         let cw = pixels.width.div_ceil(2);
@@ -2540,17 +2674,31 @@ impl<'a> InterTileEncoder<'a> {
         let v_src = extract_block(&self.pixels.v, cw, chroma_px_x, chroma_px_y, 4, cw, ch);
 
         let (dx_pixels, dy_pixels) = motion_search_block(
-            &self.pixels.y, &self.reference.y, w, h, px_x, px_y, 8, self.global_mv.0, self.global_mv.1,
+            &self.pixels.y,
+            &self.reference.y,
+            w,
+            h,
+            px_x,
+            px_y,
+            8,
+            self.global_mv.0,
+            self.global_mv.1,
         );
 
         let (refined_mv_x, refined_mv_y) = subpel_refine(
-            &self.pixels.y, &self.reference.y, w, h, px_x, px_y, 8,
-            dx_pixels * 8, dy_pixels * 8,
+            &self.pixels.y,
+            &self.reference.y,
+            w,
+            h,
+            px_x,
+            px_y,
+            8,
+            dx_pixels * 8,
+            dy_pixels * 8,
         );
 
-        let (pred_x, pred_y, mv_candidates) = predict_mv(
-            &self.block_mvs, self.mi_cols, self.mi_rows, bx, by,
-        );
+        let (pred_x, pred_y, mv_candidates) =
+            predict_mv(&self.block_mvs, self.mi_cols, self.mi_rows, bx, by);
 
         let zero_y_ref = extract_block(&self.reference.y, w, px_x, px_y, 8, w, h);
         let zero_u_ref = extract_block(&self.reference.u, cw, chroma_px_x, chroma_px_y, 4, cw, ch);
@@ -2564,7 +2712,14 @@ impl<'a> InterTileEncoder<'a> {
             let y_phase_x = (refined_mv_x & 7) as u32;
             let y_phase_y = (refined_mv_y & 7) as u32;
             let mc_y_ref = interpolate_block(
-                &self.reference.y, w, h, y_int_x, y_int_y, y_phase_x, y_phase_y, 8,
+                &self.reference.y,
+                w,
+                h,
+                y_int_x,
+                y_int_y,
+                y_phase_x,
+                y_phase_y,
+                8,
             );
 
             let mut zero_energy = 0i64;
@@ -2595,9 +2750,36 @@ impl<'a> InterTileEncoder<'a> {
             let c_phase_y = (chroma_mv_y & 7) as u32;
 
             (
-                interpolate_block(&self.reference.y, w, h, y_int_x, y_int_y, y_phase_x, y_phase_y, 8),
-                interpolate_block(&self.reference.u, cw, ch, c_int_x, c_int_y, c_phase_x, c_phase_y, 4),
-                interpolate_block(&self.reference.v, cw, ch, c_int_x, c_int_y, c_phase_x, c_phase_y, 4),
+                interpolate_block(
+                    &self.reference.y,
+                    w,
+                    h,
+                    y_int_x,
+                    y_int_y,
+                    y_phase_x,
+                    y_phase_y,
+                    8,
+                ),
+                interpolate_block(
+                    &self.reference.u,
+                    cw,
+                    ch,
+                    c_int_x,
+                    c_int_y,
+                    c_phase_x,
+                    c_phase_y,
+                    4,
+                ),
+                interpolate_block(
+                    &self.reference.v,
+                    cw,
+                    ch,
+                    c_int_x,
+                    c_int_y,
+                    c_phase_x,
+                    c_phase_y,
+                    4,
+                ),
                 refined_mv_x,
                 refined_mv_y,
             )
@@ -2638,12 +2820,15 @@ impl<'a> InterTileEncoder<'a> {
             .encode_bool(true, &mut self.cdf.is_inter[is_inter_ctx]);
 
         let ref_ctx = self.ctx.ref_ctx(bx, by);
-        
-        // Always encode LAST_FRAME (index 0) for now, even for B-frames, to see if 
+
+        // Always encode LAST_FRAME (index 0) for now, even for B-frames, to see if
         // dav1d decodes the bitstream without the MSAC probability tree desyncing.
-        self.enc.encode_bool(false, &mut self.cdf.single_ref[ref_ctx][0]);
-        self.enc.encode_bool(false, &mut self.cdf.single_ref[ref_ctx][2]);
-        self.enc.encode_bool(false, &mut self.cdf.single_ref[ref_ctx][3]);
+        self.enc
+            .encode_bool(false, &mut self.cdf.single_ref[ref_ctx][0]);
+        self.enc
+            .encode_bool(false, &mut self.cdf.single_ref[ref_ctx][2]);
+        self.enc
+            .encode_bool(false, &mut self.cdf.single_ref[ref_ctx][3]);
         self.block_mvs[(by * self.mi_cols + bx) as usize].ref_frame = 0;
 
         let newmv_ctx = self.ctx.newmv_ctx(bx, by);
@@ -2749,7 +2934,9 @@ impl<'a> InterTileEncoder<'a> {
                 let dest_x = px_x + c;
                 let dest_y = px_y + r;
                 if dest_x < w && dest_y < h {
-                    let pixel = (y_ref_block[(r * 8 + c) as usize] as i32 + y_recon_residual[(r * 8 + c) as usize]).clamp(0, 255) as u8;
+                    let pixel = (y_ref_block[(r * 8 + c) as usize] as i32
+                        + y_recon_residual[(r * 8 + c) as usize])
+                        .clamp(0, 255) as u8;
                     self.recon.y[(dest_y * w + dest_x) as usize] = pixel;
                 }
             }
@@ -2765,7 +2952,9 @@ impl<'a> InterTileEncoder<'a> {
                 let dest_x = chroma_px_x + c;
                 let dest_y = chroma_px_y + r;
                 if dest_x < cw && dest_y < ch {
-                    let pixel = (u_ref_block[(r * 4 + c) as usize] as i32 + u_recon_residual[(r * 4 + c) as usize]).clamp(0, 255) as u8;
+                    let pixel = (u_ref_block[(r * 4 + c) as usize] as i32
+                        + u_recon_residual[(r * 4 + c) as usize])
+                        .clamp(0, 255) as u8;
                     self.recon.u[(dest_y * cw + dest_x) as usize] = pixel;
                 }
             }
@@ -2781,7 +2970,9 @@ impl<'a> InterTileEncoder<'a> {
                 let dest_x = chroma_px_x + c;
                 let dest_y = chroma_px_y + r;
                 if dest_x < cw && dest_y < ch {
-                    let pixel = (v_ref_block[(r * 4 + c) as usize] as i32 + v_recon_residual[(r * 4 + c) as usize]).clamp(0, 255) as u8;
+                    let pixel = (v_ref_block[(r * 4 + c) as usize] as i32
+                        + v_recon_residual[(r * 4 + c) as usize])
+                        .clamp(0, 255) as u8;
                     self.recon.v[(dest_y * cw + dest_x) as usize] = pixel;
                 }
             }
@@ -2896,7 +3087,14 @@ impl<'a> InterTileEncoder<'a> {
             // Zero-allocation fast path
             let offset = (px_y * w + px_x) as usize;
             if bs >= 4 && (bs == 4 || bs == 8 || bs == 16 || bs == 32 || bs == 64) {
-                crate::satd::compute_satd(&self.pixels.y[offset..], &self.reference.y[offset..], bs, bs, w as usize, w as usize)
+                crate::satd::compute_satd(
+                    &self.pixels.y[offset..],
+                    &self.reference.y[offset..],
+                    bs,
+                    bs,
+                    w as usize,
+                    w as usize,
+                )
             } else {
                 let mut sad = 0;
                 for r in 0..bs {
@@ -2925,7 +3123,7 @@ impl<'a> InterTileEncoder<'a> {
                 crate::satd::compute_satd(&src_block, &ref_block, bs, bs, bs, bs)
             } else {
                 let mut sad = 0;
-                for i in 0..bs*bs {
+                for i in 0..bs * bs {
                     sad += (src_block[i] as i32 - ref_block[i] as i32).unsigned_abs();
                 }
                 sad
@@ -2939,7 +3137,7 @@ impl<'a> InterTileEncoder<'a> {
             3 => base * 6,
             _ => base * 8,
         };
-        
+
         // Zero SATD is a perfect match (e.g. solid colors), always skip.
         if satd == 0 {
             true
@@ -3179,16 +3377,16 @@ fn estimate_global_motion(source: &[u8], reference: &[u8], width: u32, height: u
             if ref_y < 0 || ref_y >= down_h as i32 {
                 return u32::MAX;
             }
-            
+
             let src_offset = src_y * down_w + origin_x;
             let ref_offset = (ref_y as usize) * down_w + origin_x;
-            
+
             for x in 0..eval_w {
                 let ref_x = origin_x as i32 + x as i32 + dx;
                 if ref_x < 0 || ref_x >= down_w as i32 {
                     return u32::MAX;
                 }
-                
+
                 let s = down_src[src_offset + x] as i32;
                 let r = down_ref[ref_offset - origin_x + ref_x as usize] as i32;
                 sad += (s - r).unsigned_abs();
@@ -3248,10 +3446,23 @@ pub fn encode_inter_tile_with_recon(
     dq: DequantValues,
     base_q_idx: u8,
 ) -> (Vec<u8>, FramePixels) {
-    assert_eq!(pixels.width, reference.width, "reference frame width mismatch");
-    assert_eq!(pixels.height, reference.height, "reference frame height mismatch");
+    assert_eq!(
+        pixels.width, reference.width,
+        "reference frame width mismatch"
+    );
+    assert_eq!(
+        pixels.height, reference.height,
+        "reference frame height mismatch"
+    );
     let global_mv = estimate_global_motion(&pixels.y, &reference.y, pixels.width, pixels.height);
-    let mut tile = InterTileEncoder::new(pixels, reference, forward_reference, dq, base_q_idx, global_mv);
+    let mut tile = InterTileEncoder::new(
+        pixels,
+        reference,
+        forward_reference,
+        dq,
+        base_q_idx,
+        global_mv,
+    );
 
     let sb_cols = tile.mi_cols.div_ceil(16);
     let sb_rows = tile.mi_rows.div_ceil(16);
@@ -3305,12 +3516,7 @@ fn encode_mv_component(
     }
 }
 
-fn encode_mv_residual(
-    enc: &mut MsacEncoder,
-    mv_cdf: &mut crate::cdf::MvCdf,
-    dy: i32,
-    dx: i32,
-) {
+fn encode_mv_residual(enc: &mut MsacEncoder, mv_cdf: &mut crate::cdf::MvCdf, dy: i32, dx: i32) {
     let joint = match (dy != 0, dx != 0) {
         (false, false) => 0,
         (false, true) => 1,
@@ -3403,7 +3609,11 @@ fn motion_search_block(
             let mut c_cost = b_cost;
 
             for &(dx, dy) in &points {
-                if dx < search_center_dx - 32 || dx > search_center_dx + 32 || dy < search_center_dy - 32 || dy > search_center_dy + 32 {
+                if dx < search_center_dx - 32
+                    || dx > search_center_dx + 32
+                    || dy < search_center_dy - 32
+                    || dy > search_center_dy + 32
+                {
                     continue;
                 }
                 let sad = eval(dx, dy);
@@ -3434,11 +3644,11 @@ fn motion_search_block(
     };
 
     let (dx1, dy1, sad1, cost1) = do_search(0, 0);
-    
+
     if start_dx == 0 && start_dy == 0 {
         return (dx1, dy1);
     }
-    
+
     let (dx2, dy2, sad2, cost2) = do_search(start_dx, start_dy);
 
     if sad2 < sad1 || (sad2 == sad1 && cost2 < cost1) {
@@ -3544,11 +3754,7 @@ fn get_drl_context(candidates: &[MvCandidate], ref_idx: usize) -> usize {
     let cur_weight = candidates[ref_idx].weight;
     let next_weight = candidates[ref_idx + 1].weight;
     if cur_weight >= 640 {
-        if next_weight < 640 {
-            1
-        } else {
-            0
-        }
+        if next_weight < 640 { 1 } else { 0 }
     } else if next_weight < 640 {
         2
     } else {
@@ -3955,7 +4161,17 @@ mod tests {
         let mut cdf = CdfContext::default();
         let coeffs = vec![0i32; 16];
         let (cul, dc_neg, dc_zero) = encode_transform_block(
-            &mut enc, &mut cdf, &coeffs, &DEFAULT_SCAN_4X4, false, false, 0, 0, 0, 0, dct::TxType::DctDct,
+            &mut enc,
+            &mut cdf,
+            &coeffs,
+            &DEFAULT_SCAN_4X4,
+            false,
+            false,
+            0,
+            0,
+            0,
+            0,
+            dct::TxType::DctDct,
         );
         assert_eq!(cul, 0);
         assert!(!dc_neg);
@@ -3969,7 +4185,17 @@ mod tests {
         let mut coeffs = vec![0i32; 64];
         coeffs[0] = 2;
         let (cul, dc_neg, dc_zero) = encode_transform_block(
-            &mut enc, &mut cdf, &coeffs, &DEFAULT_SCAN_8X8, false, false, 1, 0, 0, 0, dct::TxType::DctDct,
+            &mut enc,
+            &mut cdf,
+            &coeffs,
+            &DEFAULT_SCAN_8X8,
+            false,
+            false,
+            1,
+            0,
+            0,
+            0,
+            dct::TxType::DctDct,
         );
         assert!(cul > 0);
         assert!(!dc_neg);
@@ -3985,7 +4211,17 @@ mod tests {
         coeffs[1] = -2;
         coeffs[8] = 1;
         let (cul, _dc_neg, dc_zero) = encode_transform_block(
-            &mut enc, &mut cdf, &coeffs, &DEFAULT_SCAN_8X8, false, false, 1, 0, 0, 0, dct::TxType::DctDct,
+            &mut enc,
+            &mut cdf,
+            &coeffs,
+            &DEFAULT_SCAN_8X8,
+            false,
+            false,
+            1,
+            0,
+            0,
+            0,
+            dct::TxType::DctDct,
         );
         assert!(cul > 0);
         assert!(!dc_zero);
@@ -4090,7 +4326,8 @@ mod tests {
         let left = [128u8; 8];
         let block = [128u8; 64];
         let dq = crate::dequant::lookup_dequant(128);
-        let (mode, _) = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
+        let (mode, _) =
+            select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
         assert_eq!(mode, 0);
     }
 
@@ -4105,7 +4342,8 @@ mod tests {
             }
         }
         let dq = crate::dequant::lookup_dequant(128);
-        let (mode, _) = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
+        let (mode, _) =
+            select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
         assert_eq!(mode, 1);
     }
 
@@ -4120,7 +4358,8 @@ mod tests {
             }
         }
         let dq = crate::dequant::lookup_dequant(128);
-        let (mode, _) = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
+        let (mode, _) =
+            select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
         assert_eq!(mode, 2);
     }
 
@@ -4172,7 +4411,9 @@ mod tests {
 
     #[test]
     fn z1_d45_produces_diagonal() {
-        let above = [10u8, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160];
+        let above = [
+            10u8, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160,
+        ];
         let dx = DR_INTRA_DERIVATIVE[22] as i32;
         let result = predict_directional_z1(&above, 8, 8, dx);
         assert_eq!(result.len(), 64);
@@ -4195,7 +4436,9 @@ mod tests {
 
     #[test]
     fn z3_d203_produces_output() {
-        let left = [10u8, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160];
+        let left = [
+            10u8, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160,
+        ];
         let dy = DR_INTRA_DERIVATIVE[33] as i32;
         let result = predict_directional_z3(&left, 8, 8, dy);
         assert_eq!(result.len(), 64);
@@ -4278,7 +4521,8 @@ mod tests {
         let d45_pred = predict_directional_z1(&above, 8, 8, dx);
         block.copy_from_slice(&d45_pred);
         let dq = crate::dequant::lookup_dequant(128);
-        let (mode, _) = select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
+        let (mode, _) =
+            select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
         assert!((0..=12).contains(&mode));
     }
 
@@ -4362,9 +4606,7 @@ mod tests {
                 source[r * 64 + c] = 200;
             }
         }
-        let (dx, dy) = motion_search_block(
-            &source, &reference, 64, 64, 10, 10, 8, 0, 0,
-        );
+        let (dx, dy) = motion_search_block(&source, &reference, 64, 64, 10, 10, 8, 0, 0);
         assert_eq!((dx, dy), (4, 0));
     }
 
@@ -4372,9 +4614,7 @@ mod tests {
     fn motion_search_zero_when_same() {
         let reference = vec![200u8; 64 * 64];
         let source = vec![200u8; 64 * 64];
-        let (dx, dy) = motion_search_block(
-            &source, &reference, 64, 64, 10, 10, 8, 0, 0,
-        );
+        let (dx, dy) = motion_search_block(&source, &reference, 64, 64, 10, 10, 8, 0, 0);
         assert_eq!((dx, dy), (0, 0));
     }
 
@@ -4396,7 +4636,11 @@ mod tests {
         for row in 2..4u32 {
             for col in 0..2u32 {
                 let idx = (row * mi_cols + col) as usize;
-                block_mvs[idx] = BlockMv { mv_x: 16, mv_y: 8, ref_frame: 0 };
+                block_mvs[idx] = BlockMv {
+                    mv_x: 16,
+                    mv_y: 8,
+                    ref_frame: 0,
+                };
             }
         }
         let (px, py, _) = predict_mv(&block_mvs, mi_cols, mi_rows, 2, 2);
@@ -4411,7 +4655,11 @@ mod tests {
         for row in 0..2u32 {
             for col in 2..4u32 {
                 let idx = (row * mi_cols + col) as usize;
-                block_mvs[idx] = BlockMv { mv_x: 24, mv_y: -16, ref_frame: 0 };
+                block_mvs[idx] = BlockMv {
+                    mv_x: 24,
+                    mv_y: -16,
+                    ref_frame: 0,
+                };
             }
         }
         let (px, py, _) = predict_mv(&block_mvs, mi_cols, mi_rows, 2, 2);
@@ -4421,20 +4669,38 @@ mod tests {
     #[test]
     fn drl_context_computation() {
         let cands = vec![
-            MvCandidate { mv_x: 8, mv_y: 0, weight: 644 },
-            MvCandidate { mv_x: 16, mv_y: 0, weight: 642 },
+            MvCandidate {
+                mv_x: 8,
+                mv_y: 0,
+                weight: 644,
+            },
+            MvCandidate {
+                mv_x: 16,
+                mv_y: 0,
+                weight: 642,
+            },
         ];
         assert_eq!(get_drl_context(&cands, 0), 0);
 
         let cands2 = vec![
-            MvCandidate { mv_x: 8, mv_y: 0, weight: 644 },
-            MvCandidate { mv_x: 16, mv_y: 0, weight: 4 },
+            MvCandidate {
+                mv_x: 8,
+                mv_y: 0,
+                weight: 644,
+            },
+            MvCandidate {
+                mv_x: 16,
+                mv_y: 0,
+                weight: 4,
+            },
         ];
         assert_eq!(get_drl_context(&cands2, 0), 1);
 
-        let single = vec![
-            MvCandidate { mv_x: 8, mv_y: 0, weight: 644 },
-        ];
+        let single = vec![MvCandidate {
+            mv_x: 8,
+            mv_y: 0,
+            weight: 644,
+        }];
         assert_eq!(get_drl_context(&single, 0), 2);
     }
 }

@@ -15,10 +15,7 @@ impl FramePixels {
             .expect("No header line in Y4M data");
         let header_line = std::str::from_utf8(&data[..header_end]).expect("Invalid Y4M header");
 
-        assert!(
-            header_line.starts_with("YUV4MPEG2"),
-            "Not a YUV4MPEG2 file"
-        );
+        assert!(header_line.starts_with("YUV4MPEG2"), "Not a YUV4MPEG2 file");
 
         let mut width = 0u32;
         let mut height = 0u32;
@@ -29,10 +26,7 @@ impl FramePixels {
                 "W" => width = val.parse().expect("Invalid width"),
                 "H" => height = val.parse().expect("Invalid height"),
                 "C" => {
-                    assert!(
-                        val.starts_with("420"),
-                        "Only 4:2:0 colorspace is supported"
-                    );
+                    assert!(val.starts_with("420"), "Only 4:2:0 colorspace is supported");
                 }
                 _ => {}
             }
@@ -60,8 +54,7 @@ impl FramePixels {
             );
 
             let y_plane = data[pixel_start..pixel_start + y_size].to_vec();
-            let u_plane =
-                data[pixel_start + y_size..pixel_start + y_size + uv_size].to_vec();
+            let u_plane = data[pixel_start + y_size..pixel_start + y_size + uv_size].to_vec();
             let v_plane =
                 data[pixel_start + y_size + uv_size..pixel_start + frame_data_size].to_vec();
 
@@ -172,11 +165,7 @@ mod tests {
         assert_eq!(pixels.v.len(), 9 * 17);
     }
 
-    fn create_multi_frame_y4m(
-        width: u32,
-        height: u32,
-        frame_values: &[(u8, u8, u8)],
-    ) -> Vec<u8> {
+    fn create_multi_frame_y4m(width: u32, height: u32, frame_values: &[(u8, u8, u8)]) -> Vec<u8> {
         let header = format!("YUV4MPEG2 W{} H{} F30:1 Ip C420jpeg\n", width, height);
         let mut data = header.into_bytes();
         let y_size = (width * height) as usize;
@@ -194,7 +183,8 @@ mod tests {
 
     #[test]
     fn parse_multi_frame_y4m() {
-        let y4m = create_multi_frame_y4m(16, 16, &[(100, 110, 120), (130, 140, 150), (200, 210, 220)]);
+        let y4m =
+            create_multi_frame_y4m(16, 16, &[(100, 110, 120), (130, 140, 150), (200, 210, 220)]);
         let frames = FramePixels::all_from_y4m(&y4m);
         assert_eq!(frames.len(), 3);
 
