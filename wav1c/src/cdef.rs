@@ -29,7 +29,7 @@ fn constrain(diff: i32, strength: i32, damping: i32) -> i32 {
     }
 }
 
-pub fn cdef_analyze_direction(src: &[u8], stride: usize, bw: usize, bh: usize) -> u8 {
+pub fn cdef_analyze_direction(src: &[u16], stride: usize, bw: usize, bh: usize) -> u8 {
     let mut cost = [0i32; 8];
     for y in 0..bh {
         for x in 0..bw {
@@ -66,15 +66,16 @@ pub fn cdef_analyze_direction(src: &[u8], stride: usize, bw: usize, bh: usize) -
 
 #[allow(clippy::too_many_arguments)]
 pub fn cdef_filter_block(
-    src: &[u8],
+    src: &[u16],
     stride: usize,
-    dst: &mut [u8],
+    dst: &mut [u16],
     dst_stride: usize,
     width: usize,
     height: usize,
     pri_strength: i32,
     sec_strength: i32,
     damping: i32,
+    max_value: u16,
 ) {
     if pri_strength == 0 && sec_strength == 0 {
         for y in 0..height {
@@ -141,7 +142,7 @@ pub fn cdef_filter_block(
             }
 
             let filtered = p + ((8 + sum - (sum < 0) as i32) >> 4);
-            dst[y * dst_stride + x] = filtered.clamp(0, 255) as u8;
+            dst[y * dst_stride + x] = filtered.clamp(0, max_value as i32) as u16;
         }
     }
 }
@@ -156,9 +157,13 @@ pub fn apply_cdef_frame(
         return;
     }
 
-    let mut filtered_y = vec![0u8; pixels.y.len()];
-    let mut filtered_u = vec![0u8; pixels.u.len()];
-    let mut filtered_v = vec![0u8; pixels.v.len()];
+    let mut filtered_y = vec![0u16; pixels.y.len()];
+    let mut filtered_u = vec![0u16; pixels.u.len()];
+    let mut filtered_v = vec![0u16; pixels.v.len()];
+    let max_value = pixels.bit_depth.max_value();
+    let strength_shift = (pixels.bit_depth.bits() - 8) as i32;
+    let pri_strength = pri_strength << strength_shift;
+    let sec_strength = sec_strength << strength_shift;
 
     let width = pixels.width as usize;
     let height = pixels.height as usize;
@@ -180,6 +185,7 @@ pub fn apply_cdef_frame(
                 pri_strength,
                 sec_strength,
                 damping,
+                max_value,
             );
         }
     }
@@ -199,6 +205,7 @@ pub fn apply_cdef_frame(
                 pri_strength,
                 sec_strength,
                 damping,
+                max_value,
             );
 
             cdef_filter_block(
@@ -211,6 +218,7 @@ pub fn apply_cdef_frame(
                 pri_strength,
                 sec_strength,
                 damping,
+                max_value,
             );
         }
     }

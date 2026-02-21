@@ -3,8 +3,9 @@ use std::process::Command;
 use std::ptr;
 
 use wav1c_ffi::{
-    Wav1cConfig, wav1c_encoder_flush, wav1c_encoder_free, wav1c_encoder_headers, wav1c_encoder_new,
-    wav1c_encoder_receive_packet, wav1c_encoder_send_frame, wav1c_packet_free,
+    Wav1cConfig, Wav1cConfigEx, wav1c_encoder_flush, wav1c_encoder_free, wav1c_encoder_headers,
+    wav1c_encoder_new, wav1c_encoder_new_ex, wav1c_encoder_receive_packet,
+    wav1c_encoder_send_frame, wav1c_encoder_send_frame_u16, wav1c_packet_free,
 };
 
 fn dav1d_path() -> Option<std::path::PathBuf> {
@@ -58,6 +59,8 @@ fn encode_solid_frame() {
         keyint: 25,
         target_bitrate: 0,
         fps: 25.0,
+        b_frames: 0,
+        gop_size: 3,
     };
 
     let enc = unsafe { wav1c_encoder_new(64, 64, &cfg) };
@@ -99,6 +102,64 @@ fn encode_solid_frame() {
 }
 
 #[test]
+fn encode_solid_frame_10bit_ex() {
+    let cfg = Wav1cConfigEx {
+        base_q_idx: 128,
+        keyint: 25,
+        target_bitrate: 0,
+        fps: 25.0,
+        b_frames: 0,
+        gop_size: 3,
+        bit_depth: 10,
+        color_range: 1,
+        color_primaries: 9,
+        transfer_characteristics: 16,
+        matrix_coefficients: 9,
+        has_cll: 0,
+        max_cll: 0,
+        max_fall: 0,
+        has_mdcv: 0,
+        red_x: 0,
+        red_y: 0,
+        green_x: 0,
+        green_y: 0,
+        blue_x: 0,
+        blue_y: 0,
+        white_x: 0,
+        white_y: 0,
+        max_luminance: 0,
+        min_luminance: 0,
+    };
+
+    let enc = unsafe { wav1c_encoder_new_ex(64, 64, &cfg) };
+    assert!(!enc.is_null());
+
+    let y_plane = vec![512u16; 64 * 64];
+    let u_plane = vec![512u16; 32 * 32];
+    let v_plane = vec![512u16; 32 * 32];
+
+    let ret = unsafe {
+        wav1c_encoder_send_frame_u16(
+            enc,
+            y_plane.as_ptr(),
+            y_plane.len(),
+            u_plane.as_ptr(),
+            u_plane.len(),
+            v_plane.as_ptr(),
+            v_plane.len(),
+            0,
+            0,
+        )
+    };
+    assert_eq!(ret, 0);
+
+    let pkt = unsafe { wav1c_encoder_receive_packet(enc) };
+    assert!(!pkt.is_null());
+    unsafe { wav1c_packet_free(pkt) };
+    unsafe { wav1c_encoder_free(enc) };
+}
+
+#[test]
 fn null_config_returns_null() {
     let enc = unsafe { wav1c_encoder_new(64, 64, ptr::null()) };
     assert!(enc.is_null());
@@ -111,6 +172,8 @@ fn invalid_dimensions_returns_null() {
         keyint: 25,
         target_bitrate: 0,
         fps: 25.0,
+        b_frames: 0,
+        gop_size: 3,
     };
 
     let enc = unsafe { wav1c_encoder_new(0, 64, &cfg) };
@@ -124,6 +187,8 @@ fn headers_returns_sequence_header() {
         keyint: 25,
         target_bitrate: 0,
         fps: 25.0,
+        b_frames: 0,
+        gop_size: 3,
     };
 
     let enc = unsafe { wav1c_encoder_new(64, 64, &cfg) };
@@ -151,6 +216,8 @@ fn encode_and_decode_with_dav1d() {
         keyint: 25,
         target_bitrate: 0,
         fps: 25.0,
+        b_frames: 0,
+        gop_size: 3,
     };
 
     let enc = unsafe { wav1c_encoder_new(64, 64, &cfg) };
@@ -209,6 +276,8 @@ fn flush_is_safe_to_call() {
         keyint: 25,
         target_bitrate: 0,
         fps: 25.0,
+        b_frames: 0,
+        gop_size: 3,
     };
 
     let enc = unsafe { wav1c_encoder_new(64, 64, &cfg) };

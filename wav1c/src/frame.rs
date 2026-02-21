@@ -16,7 +16,7 @@ fn tile_log2(blk_size: u32, target: u32) -> u32 {
 }
 
 pub fn encode_frame(pixels: &FramePixels) -> Vec<u8> {
-    let dq = crate::dequant::lookup_dequant(crate::DEFAULT_BASE_Q_IDX);
+    let dq = crate::dequant::lookup_dequant(crate::DEFAULT_BASE_Q_IDX, pixels.bit_depth);
     encode_frame_with_recon(pixels, crate::DEFAULT_BASE_Q_IDX, dq).0
 }
 
@@ -138,7 +138,7 @@ pub fn encode_inter_frame(
     ref_slot: u8,
     show_frame: bool,
 ) -> Vec<u8> {
-    let dq = crate::dequant::lookup_dequant(crate::DEFAULT_BASE_Q_IDX);
+    let dq = crate::dequant::lookup_dequant(crate::DEFAULT_BASE_Q_IDX, pixels.bit_depth);
     encode_inter_frame_with_recon(
         pixels,
         reference,

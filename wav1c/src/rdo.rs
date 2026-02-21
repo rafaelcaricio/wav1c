@@ -20,6 +20,11 @@ pub fn calculate_rd_cost(distortion: u32, bits: u32, lambda: u32) -> u64 {
     (distortion as u64) + (lambda as u64) * (bits as u64)
 }
 
+#[inline]
+pub fn calculate_rd_cost_u64(distortion: u64, bits: u32, lambda: u32) -> u64 {
+    distortion + (lambda as u64) * (bits as u64)
+}
+
 /// A very rough heuristic of how many bits signaling an intra mode takes
 /// In reality, this depends on the context and MSAC probabilities.
 pub fn estimate_intra_mode_bits(mode: u8) -> u32 {

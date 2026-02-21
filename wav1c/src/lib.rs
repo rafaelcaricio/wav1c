@@ -9,6 +9,7 @@ pub mod encoder;
 pub mod error;
 pub mod frame;
 pub mod ivf;
+pub mod metadata;
 pub mod msac;
 pub mod obu;
 pub mod packet;
@@ -17,11 +18,16 @@ pub mod rdo;
 pub mod satd;
 pub mod sequence;
 pub mod tile;
+pub mod video;
 pub mod y4m;
 
 pub use encoder::{Encoder, EncoderConfig};
 pub use error::EncoderError;
 pub use packet::{FrameType, Packet};
+pub use video::{
+    BitDepth, ColorDescription, ColorRange, ContentLightLevel, MasteringDisplayMetadata,
+    VideoSignal,
+};
 
 pub const DEFAULT_BASE_Q_IDX: u8 = 128;
 pub const DEFAULT_KEYINT: usize = 25;
@@ -34,6 +40,9 @@ pub struct EncodeConfig {
     pub fps: f64,
     pub b_frames: bool,
     pub gop_size: usize,
+    pub video_signal: VideoSignal,
+    pub content_light: Option<ContentLightLevel>,
+    pub mastering_display: Option<MasteringDisplayMetadata>,
 }
 
 impl Default for EncodeConfig {
@@ -45,6 +54,9 @@ impl Default for EncodeConfig {
             fps: 25.0,
             b_frames: false,
             gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
         }
     }
 }
@@ -137,7 +149,7 @@ mod tests {
         assert_eq!(frame_data[1], temporal_delimiter_size);
         assert_eq!(frame_data[2], sequence_header_obu_header);
 
-        let seq_payload = sequence::encode_sequence_header(64, 64);
+        let seq_payload = sequence::encode_sequence_header(64, 64, &VideoSignal::default());
         let seq_size = seq_payload.len();
         assert_eq!(frame_data[3], seq_size as u8);
 

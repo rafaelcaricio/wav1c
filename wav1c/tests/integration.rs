@@ -52,6 +52,89 @@ fn decode_to_y4m(dav1d: &Path, ivf_data: &[u8], name: &str) -> (bool, String, Ve
     (result.status.success(), stderr, y4m_data)
 }
 
+fn ffprobe_path() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("FFPROBE") {
+        let path = std::path::PathBuf::from(p);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    if let Ok(output) = Command::new("which").arg("ffprobe").output()
+        && output.status.success()
+    {
+        let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !p.is_empty() {
+            return Some(std::path::PathBuf::from(p));
+        }
+    }
+
+    eprintln!("Skipping: ffprobe not found (set FFPROBE env var or install ffprobe in PATH)");
+    None
+}
+
+fn read_leb128(data: &[u8], mut pos: usize) -> Option<(usize, usize)> {
+    let mut value: usize = 0;
+    let mut shift = 0usize;
+    let start = pos;
+    loop {
+        if pos >= data.len() || shift > 28 {
+            return None;
+        }
+        let byte = data[pos];
+        pos += 1;
+        value |= ((byte & 0x7F) as usize) << shift;
+        if (byte & 0x80) == 0 {
+            break;
+        }
+        shift += 7;
+    }
+    Some((value, pos - start))
+}
+
+fn parse_obu_types_from_first_ivf_frame(ivf_data: &[u8]) -> Vec<u8> {
+    if ivf_data.len() < 44 {
+        return Vec::new();
+    }
+    let frame_size =
+        u32::from_le_bytes([ivf_data[32], ivf_data[33], ivf_data[34], ivf_data[35]]) as usize;
+    if ivf_data.len() < 44 + frame_size {
+        return Vec::new();
+    }
+    let payload = &ivf_data[44..44 + frame_size];
+    let mut types = Vec::new();
+    let mut pos = 0usize;
+    while pos < payload.len() {
+        let header = payload[pos];
+        pos += 1;
+        let has_extension = ((header >> 2) & 0x1) != 0;
+        let has_size = ((header >> 1) & 0x1) != 0;
+        let obu_type = (header >> 3) & 0x0F;
+        types.push(obu_type);
+
+        if has_extension {
+            if pos >= payload.len() {
+                break;
+            }
+            pos += 1;
+        }
+
+        if has_size {
+            let Some((size, leb_len)) = read_leb128(payload, pos) else {
+                break;
+            };
+            pos += leb_len;
+            if pos + size > payload.len() {
+                break;
+            }
+            pos += size;
+        } else {
+            break;
+        }
+    }
+    types
+}
+
 fn extract_y4m_planes(y4m_data: &[u8], width: u32, height: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let frame_marker = b"FRAME\n";
     let frame_start = y4m_data
@@ -433,7 +516,7 @@ fn recon_matches_dav1d_for_complex_content() {
     let pixels = FramePixels::from_y4m(&y4m_data);
 
     let q = 50u8;
-    let dq = wav1c::dequant::lookup_dequant(q);
+    let dq = wav1c::dequant::lookup_dequant(q, wav1c::BitDepth::Eight);
     let (frame_data, encoder_recon) = wav1c::frame::encode_frame_with_recon(&pixels, q, dq);
 
     let encoder_y_mse: f64 = pixels
@@ -459,7 +542,7 @@ fn recon_matches_dav1d_for_complex_content() {
         ));
         pkt.extend_from_slice(&wav1c::obu::obu_wrap(
             wav1c::obu::ObuType::SequenceHeader,
-            &wav1c::sequence::encode_sequence_header(320, 240),
+            &wav1c::sequence::encode_sequence_header(320, 240, &wav1c::VideoSignal::default()),
         ));
         pkt.extend_from_slice(&wav1c::obu::obu_wrap(
             wav1c::obu::ObuType::Frame,
@@ -537,7 +620,7 @@ fn debug_per_block_drift() {
     let pixels = FramePixels::from_y4m(&y4m_data);
 
     let q = 50u8;
-    let dq = wav1c::dequant::lookup_dequant(q);
+    let dq = wav1c::dequant::lookup_dequant(q, wav1c::BitDepth::Eight);
     let (frame_data, encoder_recon) = wav1c::frame::encode_frame_with_recon(&pixels, q, dq);
 
     let ivf_data = {
@@ -550,7 +633,7 @@ fn debug_per_block_drift() {
         ));
         pkt.extend_from_slice(&wav1c::obu::obu_wrap(
             wav1c::obu::ObuType::SequenceHeader,
-            &wav1c::sequence::encode_sequence_header(w, h),
+            &wav1c::sequence::encode_sequence_header(w, h, &wav1c::VideoSignal::default()),
         ));
         pkt.extend_from_slice(&wav1c::obu::obu_wrap(
             wav1c::obu::ObuType::Frame,
@@ -782,4 +865,83 @@ fn dav1d_decodes_multi_sb_inter() {
             eprintln!("  stderr: {}", stderr.lines().last().unwrap_or(""));
         }
     }
+}
+
+#[test]
+fn hdr_cll_emits_metadata_obu() {
+    let frame = FramePixels::solid_with_bit_depth(
+        64,
+        64,
+        512,
+        512,
+        512,
+        wav1c::BitDepth::Ten,
+        wav1c::ColorRange::Full,
+    );
+
+    let cfg = wav1c::EncodeConfig {
+        video_signal: wav1c::VideoSignal::hdr10(wav1c::ColorRange::Full),
+        content_light: Some(wav1c::ContentLightLevel {
+            max_content_light_level: 203,
+            max_frame_average_light_level: 64,
+        }),
+        ..Default::default()
+    };
+
+    let ivf = wav1c::encode(std::slice::from_ref(&frame), &cfg);
+    let obu_types = parse_obu_types_from_first_ivf_frame(&ivf);
+    assert!(
+        obu_types.contains(&5),
+        "expected metadata OBU, got {obu_types:?}"
+    );
+}
+
+#[test]
+fn ffprobe_reports_hdr10_signaling_for_10bit_output() {
+    let Some(ffprobe) = ffprobe_path() else {
+        return;
+    };
+
+    let frame = FramePixels::solid_with_bit_depth(
+        64,
+        64,
+        512,
+        512,
+        512,
+        wav1c::BitDepth::Ten,
+        wav1c::ColorRange::Full,
+    );
+
+    let cfg = wav1c::EncodeConfig {
+        video_signal: wav1c::VideoSignal::hdr10(wav1c::ColorRange::Full),
+        content_light: Some(wav1c::ContentLightLevel {
+            max_content_light_level: 203,
+            max_frame_average_light_level: 64,
+        }),
+        ..Default::default()
+    };
+
+    let ivf = wav1c::encode(std::slice::from_ref(&frame), &cfg);
+    let ivf_path = std::env::temp_dir().join("wav1c_hdr10_probe.ivf");
+    std::fs::File::create(&ivf_path)
+        .unwrap()
+        .write_all(&ivf)
+        .unwrap();
+
+    let output = Command::new(ffprobe)
+        .args(["-v", "error", "-show_streams", ivf_path.to_str().unwrap()])
+        .output()
+        .expect("failed to run ffprobe");
+    assert!(output.status.success(), "ffprobe failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(stdout.contains("pix_fmt=yuv420p10le"));
+    assert!(stdout.contains("color_primaries=bt2020"));
+    assert!(stdout.contains("color_transfer=smpte2084"));
+    assert!(stdout.contains("color_space=bt2020nc"));
+    assert!(
+        stdout.contains("color_range=pc"),
+        "expected full-range signaling, got:\n{}",
+        stdout
+    );
 }

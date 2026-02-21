@@ -1,4 +1,5 @@
 use crate::bitwriter::BitWriter;
+use crate::video::{BitDepth, ColorRange, VideoSignal};
 
 fn bits_needed(v: u32) -> u8 {
     if v == 0 {
@@ -8,7 +9,7 @@ fn bits_needed(v: u32) -> u8 {
     }
 }
 
-pub fn encode_sequence_header(width: u32, height: u32) -> Vec<u8> {
+pub fn encode_sequence_header(width: u32, height: u32, signal: &VideoSignal) -> Vec<u8> {
     let mut w = BitWriter::new();
 
     let seq_profile = 0u64;
@@ -69,10 +70,10 @@ pub fn encode_sequence_header(width: u32, height: u32) -> Vec<u8> {
     w.write_bit(enable_cdef);
     w.write_bit(enable_restoration);
 
-    let high_bitdepth = false;
+    let high_bitdepth = signal.bit_depth == BitDepth::Ten;
     let mono_chrome = false;
-    let color_description_present = false;
-    let color_range = false;
+    let color_description_present = signal.color_description.is_some();
+    let color_range = signal.color_range == ColorRange::Full;
     let chroma_sample_position = 0u64;
     let separate_uv_delta_q = false;
     let film_grain_params_present = false;
@@ -80,6 +81,11 @@ pub fn encode_sequence_header(width: u32, height: u32) -> Vec<u8> {
     w.write_bit(high_bitdepth);
     w.write_bit(mono_chrome);
     w.write_bit(color_description_present);
+    if let Some(desc) = signal.color_description {
+        w.write_bits(desc.color_primaries as u64, 8);
+        w.write_bits(desc.transfer_characteristics as u64, 8);
+        w.write_bits(desc.matrix_coefficients as u64, 8);
+    }
     w.write_bit(color_range);
     w.write_bits(chroma_sample_position, 2);
     w.write_bit(separate_uv_delta_q);
@@ -122,7 +128,7 @@ mod tests {
 
     #[test]
     fn sequence_header_64x64() {
-        let bytes = encode_sequence_header(64, 64);
+        let bytes = encode_sequence_header(64, 64, &VideoSignal::default());
 
         let mut expected = BitWriter::new();
         expected.write_bits(0, 3);
@@ -166,39 +172,47 @@ mod tests {
 
     #[test]
     fn sequence_header_100x100() {
-        let bytes = encode_sequence_header(100, 100);
+        let bytes = encode_sequence_header(100, 100, &VideoSignal::default());
         assert!(bytes.len() >= 8 && bytes.len() <= 12);
     }
 
     #[test]
     fn sequence_header_320x240() {
-        let bytes = encode_sequence_header(320, 240);
+        let bytes = encode_sequence_header(320, 240, &VideoSignal::default());
         assert!(bytes.len() >= 8 && bytes.len() <= 12);
     }
 
     #[test]
     fn sequence_header_1920x1080() {
-        let bytes = encode_sequence_header(1920, 1080);
+        let bytes = encode_sequence_header(1920, 1080, &VideoSignal::default());
         assert!(bytes.len() >= 8 && bytes.len() <= 12);
     }
 
     #[test]
     fn sequence_header_1x1() {
-        let bytes = encode_sequence_header(1, 1);
+        let bytes = encode_sequence_header(1, 1, &VideoSignal::default());
         assert!(bytes.len() >= 8 && bytes.len() <= 12);
     }
 
     #[test]
     fn different_dimensions_produce_different_output() {
-        let small = encode_sequence_header(64, 64);
-        let large = encode_sequence_header(1920, 1080);
+        let small = encode_sequence_header(64, 64, &VideoSignal::default());
+        let large = encode_sequence_header(1920, 1080, &VideoSignal::default());
         assert_ne!(small, large);
     }
 
     #[test]
     fn width_bits_vary_with_dimension() {
-        let bytes_64 = encode_sequence_header(64, 64);
-        let bytes_1920 = encode_sequence_header(1920, 1080);
+        let bytes_64 = encode_sequence_header(64, 64, &VideoSignal::default());
+        let bytes_1920 = encode_sequence_header(1920, 1080, &VideoSignal::default());
         assert!(bytes_1920.len() > bytes_64.len());
+    }
+
+    #[test]
+    fn hdr10_signal_changes_payload() {
+        let sdr = encode_sequence_header(320, 240, &VideoSignal::default());
+        let hdr = encode_sequence_header(320, 240, &VideoSignal::hdr10(ColorRange::Limited));
+        assert_ne!(sdr, hdr);
+        assert!(hdr.len() > sdr.len());
     }
 }

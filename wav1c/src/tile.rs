@@ -193,42 +193,43 @@ fn coef_ctx_value(cul_level: u8, dc_sign_negative: bool, dc_is_zero: bool) -> u8
 }
 
 fn predict_dc(
-    above: &[u8],
-    left: &[u8],
+    above: &[u16],
+    left: &[u16],
     have_above: bool,
     have_left: bool,
     w: usize,
     h: usize,
-) -> Vec<u8> {
+    mid_value: u16,
+) -> Vec<u16> {
     let val = if have_above && have_left {
         let sum: u32 = above[..w]
             .iter()
             .chain(left[..h].iter())
             .map(|&x| x as u32)
             .sum();
-        ((sum + (w + h) as u32 / 2) / (w + h) as u32) as u8
+        ((sum + (w + h) as u32 / 2) / (w + h) as u32) as u16
     } else if have_above {
         let sum: u32 = above[..w].iter().map(|&x| x as u32).sum();
-        ((sum + w as u32 / 2) / w as u32) as u8
+        ((sum + w as u32 / 2) / w as u32) as u16
     } else if have_left {
         let sum: u32 = left[..h].iter().map(|&x| x as u32).sum();
-        ((sum + h as u32 / 2) / h as u32) as u8
+        ((sum + h as u32 / 2) / h as u32) as u16
     } else {
-        128
+        mid_value
     };
     vec![val; w * h]
 }
 
-fn predict_v(above: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let mut out = vec![0u8; w * h];
+fn predict_v(above: &[u16], w: usize, h: usize) -> Vec<u16> {
+    let mut out = vec![0u16; w * h];
     for r in 0..h {
         out[r * w..r * w + w].copy_from_slice(&above[..w]);
     }
     out
 }
 
-fn predict_h(left: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let mut out = vec![0u8; w * h];
+fn predict_h(left: &[u16], w: usize, h: usize) -> Vec<u16> {
+    let mut out = vec![0u16; w * h];
     for r in 0..h {
         for c in 0..w {
             out[r * w + c] = left[r];
@@ -237,8 +238,8 @@ fn predict_h(left: &[u8], w: usize, h: usize) -> Vec<u8> {
     out
 }
 
-fn predict_paeth(above: &[u8], left: &[u8], top_left: u8, w: usize, h: usize) -> Vec<u8> {
-    let mut out = vec![0u8; w * h];
+fn predict_paeth(above: &[u16], left: &[u16], top_left: u16, w: usize, h: usize) -> Vec<u16> {
+    let mut out = vec![0u16; w * h];
     let tl = top_left as i32;
     for r in 0..h {
         let l = left[r] as i32;
@@ -260,8 +261,12 @@ fn predict_paeth(above: &[u8], left: &[u8], top_left: u8, w: usize, h: usize) ->
     out
 }
 
-fn predict_smooth(above: &[u8], left: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let mut out = vec![0u8; w * h];
+fn clip_sample(v: i32, max_value: u16) -> u16 {
+    v.clamp(0, max_value as i32) as u16
+}
+
+fn predict_smooth(above: &[u16], left: &[u16], w: usize, h: usize, max_value: u16) -> Vec<u16> {
+    let mut out = vec![0u16; w * h];
     let weights_x = &SM_WEIGHTS[w..w * 2];
     let weights_y = &SM_WEIGHTS[h..h * 2];
     let right = above[w - 1] as i32;
@@ -274,28 +279,28 @@ fn predict_smooth(above: &[u8], left: &[u8], w: usize, h: usize) -> Vec<u8> {
                 + (256 - wy) * bottom
                 + wx * left[r] as i32
                 + (256 - wx) * right;
-            out[r * w + c] = ((pred + 256) >> 9) as u8;
+            out[r * w + c] = clip_sample((pred + 256) >> 9, max_value);
         }
     }
     out
 }
 
-fn predict_smooth_v(above: &[u8], left: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let mut out = vec![0u8; w * h];
+fn predict_smooth_v(above: &[u16], left: &[u16], w: usize, h: usize, max_value: u16) -> Vec<u16> {
+    let mut out = vec![0u16; w * h];
     let weights = &SM_WEIGHTS[h..h * 2];
     let bottom = left[h - 1] as i32;
     for r in 0..h {
         let wy = weights[r] as i32;
         for c in 0..w {
             let pred = wy * above[c] as i32 + (256 - wy) * bottom;
-            out[r * w + c] = ((pred + 128) >> 8) as u8;
+            out[r * w + c] = clip_sample((pred + 128) >> 8, max_value);
         }
     }
     out
 }
 
-fn predict_smooth_h(above: &[u8], left: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let mut out = vec![0u8; w * h];
+fn predict_smooth_h(above: &[u16], left: &[u16], w: usize, h: usize, max_value: u16) -> Vec<u16> {
+    let mut out = vec![0u16; w * h];
     let weights = &SM_WEIGHTS[w..w * 2];
     let right = above[w - 1] as i32;
     for r in 0..h {
@@ -303,14 +308,14 @@ fn predict_smooth_h(above: &[u8], left: &[u8], w: usize, h: usize) -> Vec<u8> {
         for c in 0..w {
             let wx = weights[c] as i32;
             let pred = wx * l + (256 - wx) * right;
-            out[r * w + c] = ((pred + 128) >> 8) as u8;
+            out[r * w + c] = clip_sample((pred + 128) >> 8, max_value);
         }
     }
     out
 }
 
-fn predict_directional_z1(above: &[u8], w: usize, h: usize, dx: i32) -> Vec<u8> {
-    let mut out = vec![0u8; w * h];
+fn predict_directional_z1(above: &[u16], w: usize, h: usize, dx: i32, max_value: u16) -> Vec<u16> {
+    let mut out = vec![0u16; w * h];
     let max_base_x = (w + min(w, h) - 1).min(above.len().saturating_sub(1));
     for y in 0..h {
         let xpos_row = dx * (y as i32 + 1);
@@ -319,7 +324,7 @@ fn predict_directional_z1(above: &[u8], w: usize, h: usize, dx: i32) -> Vec<u8> 
         for x in 0..w {
             if base < max_base_x {
                 let v = above[base] as i32 * (64 - frac) + above[base + 1] as i32 * frac;
-                out[y * w + x] = ((v + 32) >> 6).clamp(0, 255) as u8;
+                out[y * w + x] = clip_sample((v + 32) >> 6, max_value);
             } else {
                 for fill_x in x..w {
                     out[y * w + fill_x] = above[max_base_x];
@@ -332,8 +337,8 @@ fn predict_directional_z1(above: &[u8], w: usize, h: usize, dx: i32) -> Vec<u8> 
     out
 }
 
-fn predict_directional_z3(left: &[u8], w: usize, h: usize, dy: i32) -> Vec<u8> {
-    let mut out = vec![0u8; w * h];
+fn predict_directional_z3(left: &[u16], w: usize, h: usize, dy: i32, max_value: u16) -> Vec<u16> {
+    let mut out = vec![0u16; w * h];
     let max_base_y = (h + min(w, h) - 1).min(left.len().saturating_sub(1));
     for x in 0..w {
         let ypos_col = dy * (x as i32 + 1);
@@ -342,7 +347,7 @@ fn predict_directional_z3(left: &[u8], w: usize, h: usize, dy: i32) -> Vec<u8> {
         for y in 0..h {
             if base < max_base_y {
                 let v = left[base] as i32 * (64 - frac) + left[base + 1] as i32 * frac;
-                out[y * w + x] = ((v + 32) >> 6).clamp(0, 255) as u8;
+                out[y * w + x] = clip_sample((v + 32) >> 6, max_value);
             } else {
                 for fill_y in y..h {
                     out[fill_y * w + x] = left[max_base_y];
@@ -357,16 +362,17 @@ fn predict_directional_z3(left: &[u8], w: usize, h: usize, dy: i32) -> Vec<u8> {
 
 #[allow(clippy::too_many_arguments)]
 fn predict_directional_z2(
-    above: &[u8],
-    left: &[u8],
-    top_left: u8,
+    above: &[u16],
+    left: &[u16],
+    top_left: u16,
     w: usize,
     h: usize,
     dx: i32,
     dy: i32,
-) -> Vec<u8> {
-    let mut out = vec![0u8; w * h];
-    let mut edge = vec![0u8; w + h + 1];
+    max_value: u16,
+) -> Vec<u16> {
+    let mut out = vec![0u16; w * h];
+    let mut edge = vec![0u16; w + h + 1];
     let tl_idx = h;
     for i in 0..h {
         edge[h - 1 - i] = left[i];
@@ -409,7 +415,7 @@ fn predict_directional_z2(
                     v = top_left as i32 * 64;
                 }
             }
-            out[y * w + x] = ((v + 32) >> 6).clamp(0, 255) as u8;
+            out[y * w + x] = clip_sample((v + 32) >> 6, max_value);
             base_x += 1;
         }
     }
@@ -421,28 +427,29 @@ const MODE_TO_ANGLE: [i32; 8] = [90, 180, 45, 135, 113, 157, 203, 67];
 #[allow(clippy::too_many_arguments)]
 fn generate_directional_prediction(
     angle: i32,
-    above: &[u8],
-    left: &[u8],
-    top_left: u8,
+    above: &[u16],
+    left: &[u16],
+    top_left: u16,
     have_above: bool,
     have_left: bool,
     w: usize,
     h: usize,
-) -> Vec<u8> {
+    max_value: u16,
+) -> Vec<u16> {
     if angle <= 90 {
         if angle < 90 && have_above {
             let dx = DR_INTRA_DERIVATIVE[(angle / 2) as usize] as i32;
-            predict_directional_z1(above, w, h, dx)
+            predict_directional_z1(above, w, h, dx, max_value)
         } else {
             predict_v(above, w, h)
         }
     } else if angle < 180 {
         let dx = DR_INTRA_DERIVATIVE[((180 - angle) / 2) as usize] as i32;
         let dy = DR_INTRA_DERIVATIVE[((angle - 90) / 2) as usize] as i32;
-        predict_directional_z2(above, left, top_left, w, h, dx, dy)
+        predict_directional_z2(above, left, top_left, w, h, dx, dy, max_value)
     } else if angle > 180 && have_left {
         let dy = DR_INTRA_DERIVATIVE[((270 - angle) / 2) as usize] as i32;
-        predict_directional_z3(left, w, h, dy)
+        predict_directional_z3(left, w, h, dy, max_value)
     } else {
         predict_h(left, w, h)
     }
@@ -452,31 +459,33 @@ fn generate_directional_prediction(
 fn generate_prediction(
     mode: u8,
     delta: i8,
-    above: &[u8],
-    left: &[u8],
-    top_left: u8,
+    above: &[u16],
+    left: &[u16],
+    top_left: u16,
     have_above: bool,
     have_left: bool,
     w: usize,
     h: usize,
-) -> Vec<u8> {
+    mid_value: u16,
+    max_value: u16,
+) -> Vec<u16> {
     match mode {
         1..=8 => {
             let angle = MODE_TO_ANGLE[(mode - 1) as usize] + 3 * delta as i32;
             generate_directional_prediction(
-                angle, above, left, top_left, have_above, have_left, w, h,
+                angle, above, left, top_left, have_above, have_left, w, h, max_value,
             )
         }
-        9 => predict_smooth(above, left, w, h),
-        10 => predict_smooth_v(above, left, w, h),
-        11 => predict_smooth_h(above, left, w, h),
+        9 => predict_smooth(above, left, w, h, max_value),
+        10 => predict_smooth_v(above, left, w, h, max_value),
+        11 => predict_smooth_h(above, left, w, h, max_value),
         12 => predict_paeth(above, left, top_left, w, h),
-        _ => predict_dc(above, left, have_above, have_left, w, h),
+        _ => predict_dc(above, left, have_above, have_left, w, h, mid_value),
     }
 }
 
 #[allow(dead_code)]
-fn compute_sad(source: &[u8], prediction: &[u8]) -> u32 {
+fn compute_sad(source: &[u16], prediction: &[u16]) -> u32 {
     source
         .iter()
         .zip(prediction.iter())
@@ -485,11 +494,12 @@ fn compute_sad(source: &[u8], prediction: &[u8]) -> u32 {
 }
 
 fn compute_rd_cost(
-    source: &[u8],
-    prediction: &[u8],
+    source: &[u16],
+    prediction: &[u16],
     dc_dq: u32,
     ac_dq: u32,
     tx_type: dct::TxType,
+    max_value: u16,
 ) -> u64 {
     let mut residual = [0i32; 64];
     for i in 0..64 {
@@ -505,7 +515,7 @@ fn compute_rd_cost(
 
     let mut sse: u64 = 0;
     for i in 0..64 {
-        let recon = (prediction[i] as i32 + recon_residual[i]).clamp(0, 255);
+        let recon = (prediction[i] as i32 + recon_residual[i]).clamp(0, max_value as i32);
         let diff = source[i] as i32 - recon;
         sse += (diff * diff) as u64;
     }
@@ -518,18 +528,20 @@ fn compute_rd_cost(
 
 #[allow(clippy::too_many_arguments)]
 fn select_best_intra_mode(
-    source: &[u8],
-    above: &[u8],
-    left: &[u8],
-    top_left: u8,
+    source: &[u16],
+    above: &[u16],
+    left: &[u16],
+    top_left: u16,
     have_above: bool,
     have_left: bool,
     w: usize,
     h: usize,
     dc_dq: u32,
     ac_dq: u32,
+    mid_value: u16,
+    max_value: u16,
 ) -> (u8, i8) {
-    let dc = predict_dc(above, left, have_above, have_left, w, h);
+    let dc = predict_dc(above, left, have_above, have_left, w, h, mid_value);
     let best_delta = 0i8;
 
     // SATD is linear (sum of absolute differences). Thus lambda should be proportional to Q, not Q^2.
@@ -542,7 +554,7 @@ fn select_best_intra_mode(
     candidates.push((
         0,
         dc,
-        crate::rdo::calculate_rd_cost(dc_satd, crate::rdo::estimate_intra_mode_bits(0), lambda),
+        crate::rdo::calculate_rd_cost_u64(dc_satd, crate::rdo::estimate_intra_mode_bits(0), lambda),
     ));
 
     if have_above {
@@ -551,7 +563,11 @@ fn select_best_intra_mode(
         candidates.push((
             1,
             v,
-            crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(1), lambda),
+            crate::rdo::calculate_rd_cost_u64(
+                satd,
+                crate::rdo::estimate_intra_mode_bits(1),
+                lambda,
+            ),
         ));
     }
 
@@ -561,33 +577,49 @@ fn select_best_intra_mode(
         candidates.push((
             2,
             hp,
-            crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(2), lambda),
+            crate::rdo::calculate_rd_cost_u64(
+                satd,
+                crate::rdo::estimate_intra_mode_bits(2),
+                lambda,
+            ),
         ));
     }
 
     if have_above && have_left {
-        let smooth = predict_smooth(above, left, w, h);
+        let smooth = predict_smooth(above, left, w, h, max_value);
         let satd = crate::satd::compute_satd(source, &smooth, w, h, w, w);
         candidates.push((
             9,
             smooth,
-            crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(9), lambda),
+            crate::rdo::calculate_rd_cost_u64(
+                satd,
+                crate::rdo::estimate_intra_mode_bits(9),
+                lambda,
+            ),
         ));
 
-        let sv = predict_smooth_v(above, left, w, h);
+        let sv = predict_smooth_v(above, left, w, h, max_value);
         let satd = crate::satd::compute_satd(source, &sv, w, h, w, w);
         candidates.push((
             10,
             sv,
-            crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(10), lambda),
+            crate::rdo::calculate_rd_cost_u64(
+                satd,
+                crate::rdo::estimate_intra_mode_bits(10),
+                lambda,
+            ),
         ));
 
-        let sh = predict_smooth_h(above, left, w, h);
+        let sh = predict_smooth_h(above, left, w, h, max_value);
         let satd = crate::satd::compute_satd(source, &sh, w, h, w, w);
         candidates.push((
             11,
             sh,
-            crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(11), lambda),
+            crate::rdo::calculate_rd_cost_u64(
+                satd,
+                crate::rdo::estimate_intra_mode_bits(11),
+                lambda,
+            ),
         ));
 
         let paeth = predict_paeth(above, left, top_left, w, h);
@@ -595,7 +627,11 @@ fn select_best_intra_mode(
         candidates.push((
             12,
             paeth,
-            crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(12), lambda),
+            crate::rdo::calculate_rd_cost_u64(
+                satd,
+                crate::rdo::estimate_intra_mode_bits(12),
+                lambda,
+            ),
         ));
     }
 
@@ -609,7 +645,7 @@ fn select_best_intra_mode(
 
     for candidate in candidates.iter().take(best_n) {
         let (mode, ref pred, _) = *candidate;
-        let real_cost = compute_rd_cost(source, pred, dc_dq, ac_dq, dct::TxType::DctDct);
+        let real_cost = compute_rd_cost(source, pred, dc_dq, ac_dq, dct::TxType::DctDct, max_value);
         if real_cost < exact_best_cost {
             exact_best_cost = real_cost;
             exact_best_mode = mode;
@@ -619,15 +655,28 @@ fn select_best_intra_mode(
     (exact_best_mode, best_delta)
 }
 
-fn select_best_txtype(source: &[u8], prediction: &[u8], dc_dq: u32, ac_dq: u32) -> dct::TxType {
+fn select_best_txtype(
+    source: &[u16],
+    prediction: &[u16],
+    dc_dq: u32,
+    ac_dq: u32,
+    max_value: u16,
+) -> dct::TxType {
     let mut best_type = dct::TxType::DctDct;
-    let mut best_cost = compute_rd_cost(source, prediction, dc_dq, ac_dq, dct::TxType::DctDct);
+    let mut best_cost = compute_rd_cost(
+        source,
+        prediction,
+        dc_dq,
+        ac_dq,
+        dct::TxType::DctDct,
+        max_value,
+    );
 
     for &tx in &TXTP_INTRA2_MAP {
         if tx == dct::TxType::DctDct {
             continue;
         }
-        let cost = compute_rd_cost(source, prediction, dc_dq, ac_dq, tx);
+        let cost = compute_rd_cost(source, prediction, dc_dq, ac_dq, tx, max_value);
         if cost < best_cost {
             best_cost = cost;
             best_type = tx;
@@ -894,15 +943,15 @@ fn gather_left_partition_prob(pc: &[u16], bl: usize) -> u16 {
 }
 
 fn extract_block(
-    plane: &[u8],
+    plane: &[u16],
     plane_stride: u32,
     px_x: u32,
     px_y: u32,
     block_size: usize,
     frame_w: u32,
     frame_h: u32,
-) -> Vec<u8> {
-    let mut block = vec![0u8; block_size * block_size];
+) -> Vec<u16> {
+    let mut block = vec![0u16; block_size * block_size];
     for r in 0..block_size {
         for c in 0..block_size {
             let sy = min(px_y + r as u32, frame_h - 1);
@@ -915,7 +964,7 @@ fn extract_block(
 
 #[allow(clippy::too_many_arguments)]
 fn interpolate_block(
-    reference: &[u8],
+    reference: &[u16],
     width: u32,
     height: u32,
     int_x: i32,
@@ -923,11 +972,12 @@ fn interpolate_block(
     phase_x: u32,
     phase_y: u32,
     block_size: u32,
-) -> Vec<u8> {
+    max_value: u16,
+) -> Vec<u16> {
     let bs = block_size as usize;
     let w = width as i32;
     let h = height as i32;
-    let mut output = vec![0u8; bs * bs];
+    let mut output = vec![0u16; bs * bs];
 
     let mx = phase_x * 2;
     let my = phase_y * 2;
@@ -946,7 +996,7 @@ fn interpolate_block(
     if mx == 0 && my == 0 {
         for r in 0..bs {
             for c in 0..bs {
-                output[r * bs + c] = ref_pixel(int_x + c as i32, int_y + r as i32) as u8;
+                output[r * bs + c] = ref_pixel(int_x + c as i32, int_y + r as i32) as u16;
             }
         }
     } else if mx != 0 && my == 0 {
@@ -958,7 +1008,7 @@ fn interpolate_block(
                 for t in 0..8i32 {
                     sum += fh[t as usize] as i32 * ref_pixel(int_x + c as i32 + t - 3, sy);
                 }
-                output[r * bs + c] = ((sum + 34) >> 6).clamp(0, 255) as u8;
+                output[r * bs + c] = ((sum + 34) >> 6).clamp(0, max_value as i32) as u16;
             }
         }
     } else if mx == 0 {
@@ -970,7 +1020,7 @@ fn interpolate_block(
                 for t in 0..8i32 {
                     sum += fv[t as usize] as i32 * ref_pixel(sx, int_y + r as i32 + t - 3);
                 }
-                output[r * bs + c] = ((sum + 32) >> 6).clamp(0, 255) as u8;
+                output[r * bs + c] = ((sum + 32) >> 6).clamp(0, max_value as i32) as u16;
             }
         }
     } else {
@@ -996,7 +1046,7 @@ fn interpolate_block(
                 for t in 0..8 {
                     sum += fv[t] as i32 * mid[(r + t) * bs + c] as i32;
                 }
-                output[r * bs + c] = ((sum + 512) >> 10).clamp(0, 255) as u8;
+                output[r * bs + c] = ((sum + 512) >> 10).clamp(0, max_value as i32) as u16;
             }
         }
     }
@@ -1006,8 +1056,8 @@ fn interpolate_block(
 
 #[allow(clippy::too_many_arguments)]
 fn subpel_refine(
-    source: &[u8],
-    reference: &[u8],
+    source: &[u16],
+    reference: &[u16],
     width: u32,
     height: u32,
     px_x: u32,
@@ -1015,10 +1065,11 @@ fn subpel_refine(
     block_size: u32,
     best_mv_x: i32,
     best_mv_y: i32,
+    max_value: u16,
 ) -> (i32, i32) {
     let bs = block_size as usize;
-    let src_block: Vec<u8> = {
-        let mut b = vec![0u8; bs * bs];
+    let src_block: Vec<u16> = {
+        let mut b = vec![0u16; bs * bs];
         for r in 0..bs {
             for c in 0..bs {
                 let sy = min(px_y + r as u32, height - 1);
@@ -1035,7 +1086,7 @@ fn subpel_refine(
         let phase_x = (mv_x & 7) as u32;
         let phase_y = (mv_y & 7) as u32;
         let pred = interpolate_block(
-            reference, width, height, int_x, int_y, phase_x, phase_y, block_size,
+            reference, width, height, int_x, int_y, phase_x, phase_y, block_size, max_value,
         );
 
         let mut ssd = 0u64;
@@ -1093,12 +1144,12 @@ struct TileContext {
     above_skip: Vec<u8>,
     left_partition: [u8; 16],
     left_skip: [u8; 32],
-    above_recon_y: Vec<u8>,
-    above_recon_u: Vec<u8>,
-    above_recon_v: Vec<u8>,
-    left_recon_y: [u8; 64],
-    left_recon_u: [u8; 32],
-    left_recon_v: [u8; 32],
+    above_recon_y: Vec<u16>,
+    above_recon_u: Vec<u16>,
+    above_recon_v: Vec<u16>,
+    left_recon_y: [u16; 64],
+    left_recon_u: [u16; 32],
+    left_recon_v: [u16; 32],
     above_lcoef: Vec<u8>,
     left_lcoef: [u8; 32],
     above_ccoef: [Vec<u8>; 2],
@@ -1109,10 +1160,11 @@ struct TileContext {
     left_mode: [u8; 32],
     above_newmv: Vec<bool>,
     left_newmv: [bool; 32],
+    mid_value: u16,
 }
 
 impl TileContext {
-    fn new(mi_cols: u32) -> Self {
+    fn new(mi_cols: u32, mid_value: u16) -> Self {
         let above_part_size = (mi_cols as usize / 2) + 16;
         let above_skip_size = mi_cols as usize + 32;
         let above_recon_y_size = mi_cols as usize * 4 + 32;
@@ -1120,17 +1172,17 @@ impl TileContext {
         let above_coef_size = mi_cols as usize + 32;
         let above_ccoef_size = (mi_cols as usize / 2) + 16;
         let above_inter_size = mi_cols as usize + 32;
-        Self {
+        let mut s = Self {
             above_partition: vec![0u8; above_part_size],
             above_skip: vec![0u8; above_skip_size],
             left_partition: [0u8; 16],
             left_skip: [0u8; 32],
-            above_recon_y: vec![128u8; above_recon_y_size],
-            above_recon_u: vec![128u8; above_recon_uv_size],
-            above_recon_v: vec![128u8; above_recon_uv_size],
-            left_recon_y: [128u8; 64],
-            left_recon_u: [128u8; 32],
-            left_recon_v: [128u8; 32],
+            above_recon_y: vec![mid_value; above_recon_y_size],
+            above_recon_u: vec![mid_value; above_recon_uv_size],
+            above_recon_v: vec![mid_value; above_recon_uv_size],
+            left_recon_y: [0u16; 64],
+            left_recon_u: [0u16; 32],
+            left_recon_v: [0u16; 32],
             above_lcoef: vec![0x40u8; above_coef_size],
             left_lcoef: [0x40u8; 32],
             above_ccoef: [
@@ -1144,15 +1196,20 @@ impl TileContext {
             left_mode: [0u8; 32],
             above_newmv: vec![false; above_inter_size],
             left_newmv: [false; 32],
-        }
+            mid_value,
+        };
+        s.left_recon_y.fill(mid_value);
+        s.left_recon_u.fill(mid_value);
+        s.left_recon_v.fill(mid_value);
+        s
     }
 
     fn reset_left_for_sb_row(&mut self) {
         self.left_partition = [0u8; 16];
         self.left_skip = [0u8; 32];
-        self.left_recon_y = [128u8; 64];
-        self.left_recon_u = [128u8; 32];
-        self.left_recon_v = [128u8; 32];
+        self.left_recon_y.fill(self.mid_value);
+        self.left_recon_u.fill(self.mid_value);
+        self.left_recon_v.fill(self.mid_value);
         self.left_lcoef = [0x40u8; 32];
         self.left_ccoef = [[0x40u8; 16]; 2];
         self.left_intra = [false; 32];
@@ -1348,12 +1405,12 @@ impl TileContext {
         }
     }
 
-    fn dc_prediction(&self, bx: u32, by: u32, bl: usize, plane: usize) -> u8 {
+    fn dc_prediction(&self, bx: u32, by: u32, bl: usize, plane: usize) -> u16 {
         let have_top = by > 0;
         let have_left = bx > 0;
 
         if !have_top && !have_left {
-            return 128;
+            return self.mid_value;
         }
 
         let (above_recon, left_recon, px_x, left_local_py, block_pixels) = if plane == 0 {
@@ -1395,7 +1452,7 @@ impl TileContext {
                 }
             }
             let count = (2 * block_pixels) as u32;
-            ((sum + count / 2) / count) as u8
+            ((sum + count / 2) / count) as u16
         } else if have_top {
             let mut sum = 0u32;
             for i in 0..block_pixels {
@@ -1405,7 +1462,7 @@ impl TileContext {
                 }
             }
             let count = block_pixels as u32;
-            ((sum + count / 2) / count) as u8
+            ((sum + count / 2) / count) as u16
         } else {
             let mut sum = 0u32;
             for i in 0..block_pixels {
@@ -1415,7 +1472,7 @@ impl TileContext {
                 }
             }
             let count = block_pixels as u32;
-            ((sum + count / 2) / count) as u8
+            ((sum + count / 2) / count) as u16
         }
     }
 
@@ -1426,12 +1483,12 @@ impl TileContext {
         by: u32,
         mi_cols: u32,
         mi_rows: u32,
-        y_bottom_row: &[u8],
-        y_right_col: &[u8],
-        u_bottom_row: &[u8],
-        u_right_col: &[u8],
-        v_bottom_row: &[u8],
-        v_right_col: &[u8],
+        y_bottom_row: &[u16],
+        y_right_col: &[u16],
+        u_bottom_row: &[u16],
+        u_right_col: &[u16],
+        v_bottom_row: &[u16],
+        v_right_col: &[u16],
     ) {
         let px_x = (bx * 4) as usize;
         let py_local = ((by & 15) * 4) as usize;
@@ -1656,10 +1713,11 @@ impl<'a> TileEncoder<'a> {
         let mi_rows = 2 * pixels.height.div_ceil(8);
         let cw = pixels.width.div_ceil(2);
         let ch = pixels.height.div_ceil(2);
+        let mid_value = pixels.bit_depth.mid_value();
         Self {
             enc: MsacEncoder::new(),
             cdf: CdfContext::for_qidx(base_q_idx),
-            ctx: TileContext::new(mi_cols),
+            ctx: TileContext::new(mi_cols, mid_value),
             mi_cols,
             mi_rows,
             pixels,
@@ -1667,9 +1725,11 @@ impl<'a> TileEncoder<'a> {
             recon: FramePixels {
                 width: pixels.width,
                 height: pixels.height,
-                y: vec![128u8; (pixels.width * pixels.height) as usize],
-                u: vec![128u8; (cw * ch) as usize],
-                v: vec![128u8; (cw * ch) as usize],
+                bit_depth: pixels.bit_depth,
+                color_range: pixels.color_range,
+                y: vec![mid_value; (pixels.width * pixels.height) as usize],
+                u: vec![mid_value; (cw * ch) as usize],
+                v: vec![mid_value; (cw * ch) as usize],
             },
         }
     }
@@ -1687,7 +1747,10 @@ impl<'a> TileEncoder<'a> {
         let have_above = by > 0;
         let have_left = bx > 0;
 
-        let above_y: Vec<u8> = (0..16)
+        let mid_value = self.pixels.bit_depth.mid_value();
+        let max_value = self.pixels.bit_depth.max_value();
+
+        let above_y: Vec<u16> = (0..16)
             .map(|i| {
                 let idx = px_x as usize + i;
                 if have_above && idx < self.ctx.above_recon_y.len() {
@@ -1696,13 +1759,13 @@ impl<'a> TileEncoder<'a> {
                     self.ctx.above_recon_y
                         [(px_x as usize + 7).min(self.ctx.above_recon_y.len() - 1)]
                 } else {
-                    128
+                    mid_value
                 }
             })
             .collect();
 
         let left_local_py = ((by & 15) * 4) as usize;
-        let left_y: Vec<u8> = (0..16)
+        let left_y: Vec<u16> = (0..16)
             .map(|i| {
                 let idx = left_local_py + i;
                 if have_left && idx < self.ctx.left_recon_y.len() {
@@ -1710,7 +1773,7 @@ impl<'a> TileEncoder<'a> {
                 } else if have_left {
                     self.ctx.left_recon_y[(left_local_py + 7).min(self.ctx.left_recon_y.len() - 1)]
                 } else {
-                    128
+                    mid_value
                 }
             })
             .collect();
@@ -1718,14 +1781,14 @@ impl<'a> TileEncoder<'a> {
         let top_left_y = if have_above && have_left {
             self.recon.y[((px_y - 1) * w + (px_x - 1)) as usize]
         } else {
-            128
+            mid_value
         };
 
         let y_block = extract_block(&self.pixels.y, w, px_x, px_y, 8, w, h);
 
         let (y_mode, y_angle_delta) = select_best_intra_mode(
             &y_block, &above_y, &left_y, top_left_y, have_above, have_left, 8, 8, self.dq.dc,
-            self.dq.ac,
+            self.dq.ac, mid_value, max_value,
         );
         let y_pred_block = generate_prediction(
             y_mode,
@@ -1737,8 +1800,11 @@ impl<'a> TileEncoder<'a> {
             have_left,
             8,
             8,
+            mid_value,
+            max_value,
         );
-        let y_txtype = select_best_txtype(&y_block, &y_pred_block, self.dq.dc, self.dq.ac);
+        let y_txtype =
+            select_best_txtype(&y_block, &y_pred_block, self.dq.dc, self.dq.ac, max_value);
 
         let u_pred = self.ctx.dc_prediction(bx, by, bl, 1);
         let v_pred = self.ctx.dc_prediction(bx, by, bl, 2);
@@ -1884,7 +1950,7 @@ impl<'a> TileEncoder<'a> {
                 if dest_x < w && dest_y < h {
                     let pixel = (y_pred_block[(r * 8 + c) as usize] as i32
                         + y_recon_residual[(r * 8 + c) as usize])
-                        .clamp(0, 255) as u8;
+                        .clamp(0, max_value as i32) as u16;
                     self.recon.y[(dest_y * w + dest_x) as usize] = pixel;
                 }
             }
@@ -1901,7 +1967,7 @@ impl<'a> TileEncoder<'a> {
                 let dest_y = chroma_px_y + r;
                 if dest_x < cw && dest_y < ch {
                     let pixel = (u_pred as i32 + u_recon_residual[(r * 4 + c) as usize])
-                        .clamp(0, 255) as u8;
+                        .clamp(0, max_value as i32) as u16;
                     self.recon.u[(dest_y * cw + dest_x) as usize] = pixel;
                 }
             }
@@ -1918,14 +1984,14 @@ impl<'a> TileEncoder<'a> {
                 let dest_y = chroma_px_y + r;
                 if dest_x < cw && dest_y < ch {
                     let pixel = (v_pred as i32 + v_recon_residual[(r * 4 + c) as usize])
-                        .clamp(0, 255) as u8;
+                        .clamp(0, max_value as i32) as u16;
                     self.recon.v[(dest_y * cw + dest_x) as usize] = pixel;
                 }
             }
         }
 
-        let mut y_bottom_row = [128u8; 8];
-        let mut y_right_col = [128u8; 8];
+        let mut y_bottom_row = [mid_value; 8];
+        let mut y_right_col = [mid_value; 8];
         for c in 0..8u32 {
             let dest_x = px_x + c;
             let dest_y = px_y + 7;
@@ -1941,8 +2007,8 @@ impl<'a> TileEncoder<'a> {
             }
         }
 
-        let mut u_bottom_row = [128u8; 4];
-        let mut u_right_col = [128u8; 4];
+        let mut u_bottom_row = [mid_value; 4];
+        let mut u_right_col = [mid_value; 4];
         for c in 0..4u32 {
             let dest_x = chroma_px_x + c;
             let dest_y = chroma_px_y + 3;
@@ -1958,8 +2024,8 @@ impl<'a> TileEncoder<'a> {
             }
         }
 
-        let mut v_bottom_row = [128u8; 4];
-        let mut v_right_col = [128u8; 4];
+        let mut v_bottom_row = [mid_value; 4];
+        let mut v_right_col = [mid_value; 4];
         for c in 0..4u32 {
             let dest_x = chroma_px_x + c;
             let dest_y = chroma_px_y + 3;
@@ -2021,8 +2087,10 @@ impl<'a> TileEncoder<'a> {
 
         let have_above = by > 0;
         let have_left = bx > 0;
+        let mid_value = self.pixels.bit_depth.mid_value();
+        let max_value = self.pixels.bit_depth.max_value();
 
-        let above_y: Vec<u8> = (0..32)
+        let above_y: Vec<u16> = (0..32)
             .map(|i| {
                 let idx = px_x as usize + i;
                 if have_above && idx < self.ctx.above_recon_y.len() {
@@ -2031,13 +2099,13 @@ impl<'a> TileEncoder<'a> {
                     self.ctx.above_recon_y
                         [(px_x as usize + 15).min(self.ctx.above_recon_y.len() - 1)]
                 } else {
-                    128
+                    mid_value
                 }
             })
             .collect();
 
         let left_local_py = ((by & 15) * 4) as usize;
-        let left_y: Vec<u8> = (0..32)
+        let left_y: Vec<u16> = (0..32)
             .map(|i| {
                 let idx = left_local_py + i;
                 if have_left && idx < self.ctx.left_recon_y.len() {
@@ -2045,7 +2113,7 @@ impl<'a> TileEncoder<'a> {
                 } else if have_left {
                     self.ctx.left_recon_y[(left_local_py + 15).min(self.ctx.left_recon_y.len() - 1)]
                 } else {
-                    128
+                    mid_value
                 }
             })
             .collect();
@@ -2053,14 +2121,14 @@ impl<'a> TileEncoder<'a> {
         let top_left_y = if have_above && have_left {
             self.recon.y[((px_y - 1) * w + (px_x - 1)) as usize]
         } else {
-            128
+            mid_value
         };
 
         let y_block = extract_block(&self.pixels.y, w, px_x, px_y, 16, w, h);
 
         let (y_mode, y_angle_delta) = select_best_intra_mode(
             &y_block, &above_y, &left_y, top_left_y, have_above, have_left, 16, 16, self.dq.dc,
-            self.dq.ac,
+            self.dq.ac, mid_value, max_value,
         );
         let y_pred_block = generate_prediction(
             y_mode,
@@ -2072,6 +2140,8 @@ impl<'a> TileEncoder<'a> {
             have_left,
             16,
             16,
+            mid_value,
+            max_value,
         );
         let y_txtype = dct::TxType::DctDct;
 
@@ -2219,7 +2289,7 @@ impl<'a> TileEncoder<'a> {
                 if dest_x < w && dest_y < h {
                     let pixel = (y_pred_block[(r * 16 + c) as usize] as i32
                         + y_recon_residual[(r * 16 + c) as usize])
-                        .clamp(0, 255) as u8;
+                        .clamp(0, max_value as i32) as u16;
                     self.recon.y[(dest_y * w + dest_x) as usize] = pixel;
                 }
             }
@@ -2236,7 +2306,7 @@ impl<'a> TileEncoder<'a> {
                 let dest_y = chroma_px_y + r;
                 if dest_x < cw && dest_y < ch {
                     let pixel = (u_pred as i32 + u_recon_residual[(r * 8 + c) as usize])
-                        .clamp(0, 255) as u8;
+                        .clamp(0, max_value as i32) as u16;
                     self.recon.u[(dest_y * cw + dest_x) as usize] = pixel;
                 }
             }
@@ -2253,14 +2323,14 @@ impl<'a> TileEncoder<'a> {
                 let dest_y = chroma_px_y + r;
                 if dest_x < cw && dest_y < ch {
                     let pixel = (v_pred as i32 + v_recon_residual[(r * 8 + c) as usize])
-                        .clamp(0, 255) as u8;
+                        .clamp(0, max_value as i32) as u16;
                     self.recon.v[(dest_y * cw + dest_x) as usize] = pixel;
                 }
             }
         }
 
-        let mut y_bottom_row = vec![128u8; 16];
-        let mut y_right_col = vec![128u8; 16];
+        let mut y_bottom_row = vec![mid_value; 16];
+        let mut y_right_col = vec![mid_value; 16];
         for c in 0..16u32 {
             let dest_x = px_x + c;
             let dest_y = px_y + 15;
@@ -2276,8 +2346,8 @@ impl<'a> TileEncoder<'a> {
             }
         }
 
-        let mut u_bottom_row = vec![128u8; 8];
-        let mut u_right_col = vec![128u8; 8];
+        let mut u_bottom_row = vec![mid_value; 8];
+        let mut u_right_col = vec![mid_value; 8];
         for c in 0..8u32 {
             let dest_x = chroma_px_x + c;
             let dest_y = chroma_px_y + 7;
@@ -2293,8 +2363,8 @@ impl<'a> TileEncoder<'a> {
             }
         }
 
-        let mut v_bottom_row = vec![128u8; 8];
-        let mut v_right_col = vec![128u8; 8];
+        let mut v_bottom_row = vec![mid_value; 8];
+        let mut v_right_col = vec![mid_value; 8];
         for c in 0..8u32 {
             let dest_x = chroma_px_x + c;
             let dest_y = chroma_px_y + 7;
@@ -2580,7 +2650,7 @@ impl<'a> TileEncoder<'a> {
 }
 
 pub fn encode_tile(pixels: &FramePixels) -> Vec<u8> {
-    let dq = crate::dequant::lookup_dequant(crate::DEFAULT_BASE_Q_IDX);
+    let dq = crate::dequant::lookup_dequant(crate::DEFAULT_BASE_Q_IDX, pixels.bit_depth);
     encode_tile_with_recon(pixels, dq, crate::DEFAULT_BASE_Q_IDX).0
 }
 
@@ -2637,12 +2707,13 @@ impl<'a> InterTileEncoder<'a> {
         let mi_rows = 2 * pixels.height.div_ceil(8);
         let cw = pixels.width.div_ceil(2);
         let ch = pixels.height.div_ceil(2);
+        let mid_value = pixels.bit_depth.mid_value();
         let mut enc = MsacEncoder::new();
         enc.allow_update_cdf = false;
         Self {
             enc,
             cdf: CdfContext::for_qidx(base_q_idx),
-            ctx: TileContext::new(mi_cols),
+            ctx: TileContext::new(mi_cols, mid_value),
             mi_cols,
             mi_rows,
             pixels,
@@ -2654,9 +2725,11 @@ impl<'a> InterTileEncoder<'a> {
             recon: FramePixels {
                 width: pixels.width,
                 height: pixels.height,
-                y: vec![128u8; (pixels.width * pixels.height) as usize],
-                u: vec![128u8; (cw * ch) as usize],
-                v: vec![128u8; (cw * ch) as usize],
+                bit_depth: pixels.bit_depth,
+                color_range: pixels.color_range,
+                y: vec![mid_value; (pixels.width * pixels.height) as usize],
+                u: vec![mid_value; (cw * ch) as usize],
+                v: vec![mid_value; (cw * ch) as usize],
             },
             block_mvs: vec![BlockMv::default(); (mi_cols * mi_rows) as usize],
         }
@@ -2671,6 +2744,8 @@ impl<'a> InterTileEncoder<'a> {
         let ch = h.div_ceil(2);
         let chroma_px_x = px_x / 2;
         let chroma_px_y = px_y / 2;
+        let mid_value = self.pixels.bit_depth.mid_value();
+        let max_value = self.pixels.bit_depth.max_value();
 
         let y_src = extract_block(&self.pixels.y, w, px_x, px_y, 8, w, h);
         let u_src = extract_block(&self.pixels.u, cw, chroma_px_x, chroma_px_y, 4, cw, ch);
@@ -2698,6 +2773,7 @@ impl<'a> InterTileEncoder<'a> {
             8,
             dx_pixels * 8,
             dy_pixels * 8,
+            max_value,
         );
 
         let (pred_x, pred_y, mv_candidates) =
@@ -2723,6 +2799,7 @@ impl<'a> InterTileEncoder<'a> {
                 y_phase_x,
                 y_phase_y,
                 8,
+                max_value,
             );
 
             let mut zero_energy = 0i64;
@@ -2762,6 +2839,7 @@ impl<'a> InterTileEncoder<'a> {
                     y_phase_x,
                     y_phase_y,
                     8,
+                    max_value,
                 ),
                 interpolate_block(
                     &self.reference.u,
@@ -2772,6 +2850,7 @@ impl<'a> InterTileEncoder<'a> {
                     c_phase_x,
                     c_phase_y,
                     4,
+                    max_value,
                 ),
                 interpolate_block(
                     &self.reference.v,
@@ -2782,6 +2861,7 @@ impl<'a> InterTileEncoder<'a> {
                     c_phase_x,
                     c_phase_y,
                     4,
+                    max_value,
                 ),
                 refined_mv_x,
                 refined_mv_y,
@@ -2939,7 +3019,7 @@ impl<'a> InterTileEncoder<'a> {
                 if dest_x < w && dest_y < h {
                     let pixel = (y_ref_block[(r * 8 + c) as usize] as i32
                         + y_recon_residual[(r * 8 + c) as usize])
-                        .clamp(0, 255) as u8;
+                        .clamp(0, max_value as i32) as u16;
                     self.recon.y[(dest_y * w + dest_x) as usize] = pixel;
                 }
             }
@@ -2957,7 +3037,7 @@ impl<'a> InterTileEncoder<'a> {
                 if dest_x < cw && dest_y < ch {
                     let pixel = (u_ref_block[(r * 4 + c) as usize] as i32
                         + u_recon_residual[(r * 4 + c) as usize])
-                        .clamp(0, 255) as u8;
+                        .clamp(0, max_value as i32) as u16;
                     self.recon.u[(dest_y * cw + dest_x) as usize] = pixel;
                 }
             }
@@ -2975,14 +3055,14 @@ impl<'a> InterTileEncoder<'a> {
                 if dest_x < cw && dest_y < ch {
                     let pixel = (v_ref_block[(r * 4 + c) as usize] as i32
                         + v_recon_residual[(r * 4 + c) as usize])
-                        .clamp(0, 255) as u8;
+                        .clamp(0, max_value as i32) as u16;
                     self.recon.v[(dest_y * cw + dest_x) as usize] = pixel;
                 }
             }
         }
 
-        let mut y_bottom_row = [128u8; 8];
-        let mut y_right_col = [128u8; 8];
+        let mut y_bottom_row = [mid_value; 8];
+        let mut y_right_col = [mid_value; 8];
         for c in 0..8u32 {
             let dest_x = px_x + c;
             let dest_y = px_y + 7;
@@ -2998,8 +3078,8 @@ impl<'a> InterTileEncoder<'a> {
             }
         }
 
-        let mut u_bottom_row = [128u8; 4];
-        let mut u_right_col = [128u8; 4];
+        let mut u_bottom_row = [mid_value; 4];
+        let mut u_right_col = [mid_value; 4];
         for c in 0..4u32 {
             let dest_x = chroma_px_x + c;
             let dest_y = chroma_px_y + 3;
@@ -3015,8 +3095,8 @@ impl<'a> InterTileEncoder<'a> {
             }
         }
 
-        let mut v_bottom_row = [128u8; 4];
-        let mut v_right_col = [128u8; 4];
+        let mut v_bottom_row = [mid_value; 4];
+        let mut v_right_col = [mid_value; 4];
         for c in 0..4u32 {
             let dest_x = chroma_px_x + c;
             let dest_y = chroma_px_y + 3;
@@ -3099,20 +3179,20 @@ impl<'a> InterTileEncoder<'a> {
                     w as usize,
                 )
             } else {
-                let mut sad = 0;
+                let mut sad = 0u64;
                 for r in 0..bs {
                     for c in 0..bs {
                         let s = self.pixels.y[offset + r * w as usize + c] as i32;
                         let ref_p = self.reference.y[offset + r * w as usize + c] as i32;
-                        sad += (s - ref_p).unsigned_abs();
+                        sad += (s - ref_p).unsigned_abs() as u64;
                     }
                 }
                 sad
             }
         } else {
             // Edge fallback path with clamping
-            let mut src_block = vec![0u8; bs * bs];
-            let mut ref_block = vec![0u8; bs * bs];
+            let mut src_block = vec![0u16; bs * bs];
+            let mut ref_block = vec![0u16; bs * bs];
             for r in 0..bs {
                 for c in 0..bs {
                     let sy = std::cmp::min(px_y + r as u32, h - 1);
@@ -3125,9 +3205,9 @@ impl<'a> InterTileEncoder<'a> {
             if bs >= 4 && (bs == 4 || bs == 8 || bs == 16 || bs == 32 || bs == 64) {
                 crate::satd::compute_satd(&src_block, &ref_block, bs, bs, bs, bs)
             } else {
-                let mut sad = 0;
+                let mut sad = 0u64;
                 for i in 0..bs * bs {
-                    sad += (src_block[i] as i32 - ref_block[i] as i32).unsigned_abs();
+                    sad += (src_block[i] as i32 - ref_block[i] as i32).unsigned_abs() as u64;
                 }
                 sad
             }
@@ -3142,11 +3222,7 @@ impl<'a> InterTileEncoder<'a> {
         };
 
         // Zero SATD is a perfect match (e.g. solid colors), always skip.
-        if satd == 0 {
-            true
-        } else {
-            (satd as u64) <= threshold
-        }
+        if satd == 0 { true } else { satd <= threshold }
     }
 
     fn encode_inter_skip_block(&mut self, bx: u32, by: u32, bl: usize) {
@@ -3160,6 +3236,7 @@ impl<'a> InterTileEncoder<'a> {
         let ch = h.div_ceil(2);
         let cpx = px_x / 2;
         let cpy = px_y / 2;
+        let mid_value = self.pixels.bit_depth.mid_value();
 
         let skip_ctx = self.ctx.skip_ctx(bx, by);
         self.enc.encode_bool(true, &mut self.cdf.skip[skip_ctx]);
@@ -3207,12 +3284,12 @@ impl<'a> InterTileEncoder<'a> {
 
         let y_bp = block_size as usize;
         let c_bp = chroma_size as usize;
-        let mut y_bottom = vec![128u8; y_bp];
-        let mut y_right = vec![128u8; y_bp];
-        let mut u_bottom = vec![128u8; c_bp];
-        let mut u_right = vec![128u8; c_bp];
-        let mut v_bottom = vec![128u8; c_bp];
-        let mut v_right = vec![128u8; c_bp];
+        let mut y_bottom = vec![mid_value; y_bp];
+        let mut y_right = vec![mid_value; y_bp];
+        let mut u_bottom = vec![mid_value; c_bp];
+        let mut u_right = vec![mid_value; c_bp];
+        let mut v_bottom = vec![mid_value; c_bp];
+        let mut v_right = vec![mid_value; c_bp];
 
         for i in 0..y_bp {
             let dest_x = px_x + (block_size - 1);
@@ -3345,19 +3422,24 @@ impl<'a> InterTileEncoder<'a> {
 }
 
 pub fn encode_inter_tile(pixels: &FramePixels, reference: &FramePixels) -> Vec<u8> {
-    let dq = crate::dequant::lookup_dequant(crate::DEFAULT_BASE_Q_IDX);
+    let dq = crate::dequant::lookup_dequant(crate::DEFAULT_BASE_Q_IDX, pixels.bit_depth);
     encode_inter_tile_with_recon(pixels, reference, None, dq, crate::DEFAULT_BASE_Q_IDX).0
 }
 
-fn estimate_global_motion(source: &[u8], reference: &[u8], width: u32, height: u32) -> (i32, i32) {
+fn estimate_global_motion(
+    source: &[u16],
+    reference: &[u16],
+    width: u32,
+    height: u32,
+) -> (i32, i32) {
     if width < 32 || height < 32 {
         return (0, 0);
     }
 
     let down_w = (width / 4) as usize;
     let down_h = (height / 4) as usize;
-    let mut down_src = vec![0u8; down_w * down_h];
-    let mut down_ref = vec![0u8; down_w * down_h];
+    let mut down_src = vec![0u16; down_w * down_h];
+    let mut down_ref = vec![0u16; down_w * down_h];
 
     let w = width as usize;
     for y in 0..down_h {
@@ -3539,8 +3621,8 @@ fn encode_mv_residual(enc: &mut MsacEncoder, mv_cdf: &mut crate::cdf::MvCdf, dy:
 
 #[allow(clippy::too_many_arguments)]
 fn motion_search_block(
-    source: &[u8],
-    reference: &[u8],
+    source: &[u16],
+    reference: &[u16],
     width: u32,
     height: u32,
     px_x: u32,
@@ -3552,7 +3634,6 @@ fn motion_search_block(
     if px_x + block_size > width || px_y + block_size > height {
         return (0, 0);
     }
-
 
     let eval = |dx: i32, dy: i32| -> u32 {
         let ref_x = px_x as i32 + dx;
@@ -3771,6 +3852,191 @@ mod tests {
         encode_tile(&pixels)
     }
 
+    fn to_u16(samples: &[u8]) -> Vec<u16> {
+        samples.iter().map(|&s| s as u16).collect()
+    }
+
+    fn to_u8(samples: Vec<u16>) -> Vec<u8> {
+        samples
+            .into_iter()
+            .map(|s| s.min(u8::MAX as u16) as u8)
+            .collect()
+    }
+
+    fn predict_v(above: &[u8], w: usize, h: usize) -> Vec<u8> {
+        to_u8(super::predict_v(&to_u16(above), w, h))
+    }
+
+    fn predict_h(left: &[u8], w: usize, h: usize) -> Vec<u8> {
+        to_u8(super::predict_h(&to_u16(left), w, h))
+    }
+
+    fn predict_paeth(above: &[u8], left: &[u8], top_left: u8, w: usize, h: usize) -> Vec<u8> {
+        to_u8(super::predict_paeth(
+            &to_u16(above),
+            &to_u16(left),
+            top_left as u16,
+            w,
+            h,
+        ))
+    }
+
+    fn predict_smooth(above: &[u8], left: &[u8], w: usize, h: usize) -> Vec<u8> {
+        to_u8(super::predict_smooth(
+            &to_u16(above),
+            &to_u16(left),
+            w,
+            h,
+            255,
+        ))
+    }
+
+    fn predict_dc(
+        above: &[u8],
+        left: &[u8],
+        have_above: bool,
+        have_left: bool,
+        w: usize,
+        h: usize,
+    ) -> Vec<u8> {
+        to_u8(super::predict_dc(
+            &to_u16(above),
+            &to_u16(left),
+            have_above,
+            have_left,
+            w,
+            h,
+            128,
+        ))
+    }
+
+    fn predict_directional_z1(above: &[u8], w: usize, h: usize, dx: i32) -> Vec<u8> {
+        to_u8(super::predict_directional_z1(&to_u16(above), w, h, dx, 255))
+    }
+
+    fn predict_directional_z3(left: &[u8], w: usize, h: usize, dy: i32) -> Vec<u8> {
+        to_u8(super::predict_directional_z3(&to_u16(left), w, h, dy, 255))
+    }
+
+    fn predict_directional_z2(
+        above: &[u8],
+        left: &[u8],
+        top_left: u8,
+        w: usize,
+        h: usize,
+        dx: i32,
+        dy: i32,
+    ) -> Vec<u8> {
+        to_u8(super::predict_directional_z2(
+            &to_u16(above),
+            &to_u16(left),
+            top_left as u16,
+            w,
+            h,
+            dx,
+            dy,
+            255,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn generate_prediction(
+        mode: u8,
+        angle_delta: i8,
+        above: &[u8],
+        left: &[u8],
+        top_left: u8,
+        have_above: bool,
+        have_left: bool,
+        w: usize,
+        h: usize,
+    ) -> Vec<u8> {
+        to_u8(super::generate_prediction(
+            mode,
+            angle_delta,
+            &to_u16(above),
+            &to_u16(left),
+            top_left as u16,
+            have_above,
+            have_left,
+            w,
+            h,
+            128,
+            255,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn select_best_intra_mode(
+        source: &[u8],
+        above: &[u8],
+        left: &[u8],
+        top_left: u8,
+        have_above: bool,
+        have_left: bool,
+        w: usize,
+        h: usize,
+        dq_dc: u32,
+        dq_ac: u32,
+    ) -> (u8, i8) {
+        super::select_best_intra_mode(
+            &to_u16(source),
+            &to_u16(above),
+            &to_u16(left),
+            top_left as u16,
+            have_above,
+            have_left,
+            w,
+            h,
+            dq_dc,
+            dq_ac,
+            128,
+            255,
+        )
+    }
+
+    fn compute_rd_cost(
+        source: &[u8],
+        prediction: &[u8],
+        dq_dc: u32,
+        dq_ac: u32,
+        tx_type: dct::TxType,
+    ) -> u64 {
+        super::compute_rd_cost(
+            &to_u16(source),
+            &to_u16(prediction),
+            dq_dc,
+            dq_ac,
+            tx_type,
+            255,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn motion_search_block(
+        source: &[u8],
+        reference: &[u8],
+        width: u32,
+        height: u32,
+        bx: u32,
+        by: u32,
+        bsize: u32,
+        pred_x: i32,
+        pred_y: i32,
+    ) -> (i32, i32) {
+        super::motion_search_block(
+            &to_u16(source),
+            &to_u16(reference),
+            width,
+            height,
+            bx,
+            by,
+            bsize,
+            pred_x,
+            pred_y,
+        )
+    }
+
     #[test]
     fn encode_tile_64x64_produces_bytes() {
         let bytes = encode_tile_solid(64, 64, 128, 128, 128);
@@ -3826,13 +4092,13 @@ mod tests {
 
     #[test]
     fn partition_ctx_initial_is_zero() {
-        let ctx = TileContext::new(16);
+        let ctx = TileContext::new(16, 128);
         assert_eq!(ctx.partition_ctx(0, 0, 1), 0);
     }
 
     #[test]
     fn partition_ctx_updates_correctly() {
-        let mut ctx = TileContext::new(32);
+        let mut ctx = TileContext::new(32, 128);
         ctx.update_partition_ctx(0, 0, 2, 32, 32);
         let ctx_at_bl1 = ctx.partition_ctx(0, 0, 1);
         assert_eq!(ctx_at_bl1, 3);
@@ -3840,7 +4106,7 @@ mod tests {
 
     #[test]
     fn skip_ctx_updates() {
-        let mut ctx = TileContext::new(32);
+        let mut ctx = TileContext::new(32, 128);
         assert_eq!(ctx.skip_ctx(0, 0), 0);
         ctx.update_skip_ctx(0, 0, 1, 32, 32, true);
         assert!(ctx.skip_ctx(0, 0) > 0);
@@ -3890,13 +4156,13 @@ mod tests {
 
     #[test]
     fn dc_prediction_no_neighbors() {
-        let ctx = TileContext::new(32);
+        let ctx = TileContext::new(32, 128);
         assert_eq!(ctx.dc_prediction(0, 0, 1, 0), 128);
     }
 
     #[test]
     fn dc_prediction_top_only() {
-        let mut ctx = TileContext::new(32);
+        let mut ctx = TileContext::new(32, 128);
         for i in 0..8 {
             ctx.above_recon_y[i] = 200;
         }
@@ -3905,7 +4171,7 @@ mod tests {
 
     #[test]
     fn dc_prediction_both() {
-        let mut ctx = TileContext::new(32);
+        let mut ctx = TileContext::new(32, 128);
         for i in 0..8 {
             ctx.above_recon_y[8 + i] = 200;
         }
@@ -3920,7 +4186,7 @@ mod tests {
         let mut pixels = FramePixels::solid(64, 64, 128, 128, 128);
         for row in 0..64u32 {
             for col in 0..64u32 {
-                pixels.y[(row * 64 + col) as usize] = (row * 4) as u8;
+                pixels.y[(row * 64 + col) as usize] = (row * 4) as u16;
             }
         }
         let bytes = encode_tile(&pixels);
@@ -4014,13 +4280,13 @@ mod tests {
 
     #[test]
     fn is_inter_ctx_no_neighbors() {
-        let ctx = TileContext::new(32);
+        let ctx = TileContext::new(32, 128);
         assert_eq!(ctx.is_inter_ctx(0, 0), 0);
     }
 
     #[test]
     fn is_inter_ctx_both_intra_neighbors() {
-        let mut ctx = TileContext::new(32);
+        let mut ctx = TileContext::new(32, 128);
         ctx.above_intra[2] = true;
         ctx.left_intra[2] = true;
         assert_eq!(ctx.is_inter_ctx(2, 2), 3);
@@ -4028,7 +4294,7 @@ mod tests {
 
     #[test]
     fn is_inter_ctx_both_inter_neighbors() {
-        let mut ctx = TileContext::new(32);
+        let mut ctx = TileContext::new(32, 128);
         ctx.above_intra[2] = false;
         ctx.left_intra[2] = false;
         assert_eq!(ctx.is_inter_ctx(2, 2), 0);
@@ -4036,7 +4302,7 @@ mod tests {
 
     #[test]
     fn is_inter_ctx_one_intra_neighbor() {
-        let mut ctx = TileContext::new(32);
+        let mut ctx = TileContext::new(32, 128);
         ctx.above_intra[2] = true;
         ctx.left_intra[2] = false;
         assert_eq!(ctx.is_inter_ctx(2, 2), 1);
@@ -4044,26 +4310,26 @@ mod tests {
 
     #[test]
     fn is_inter_ctx_top_only_inter() {
-        let ctx = TileContext::new(32);
+        let ctx = TileContext::new(32, 128);
         assert_eq!(ctx.is_inter_ctx(0, 2), 0);
     }
 
     #[test]
     fn is_inter_ctx_top_only_intra() {
-        let mut ctx = TileContext::new(32);
+        let mut ctx = TileContext::new(32, 128);
         ctx.above_intra[0] = true;
         assert_eq!(ctx.is_inter_ctx(0, 2), 2);
     }
 
     #[test]
     fn newmv_ctx_no_neighbors() {
-        let ctx = TileContext::new(32);
+        let ctx = TileContext::new(32, 128);
         assert_eq!(ctx.newmv_ctx(0, 0), 0);
     }
 
     #[test]
     fn newmv_ctx_left_only() {
-        let mut ctx = TileContext::new(32);
+        let mut ctx = TileContext::new(32, 128);
         ctx.above_intra[16] = false;
         ctx.left_intra[0] = false;
         assert_eq!(ctx.newmv_ctx(16, 0), 3);
@@ -4071,33 +4337,33 @@ mod tests {
 
     #[test]
     fn newmv_ctx_top_only() {
-        let ctx = TileContext::new(32);
+        let ctx = TileContext::new(32, 128);
         assert_eq!(ctx.newmv_ctx(0, 16), 3);
     }
 
     #[test]
     fn newmv_ctx_both_neighbors() {
-        let ctx = TileContext::new(64);
+        let ctx = TileContext::new(64, 128);
         assert_eq!(ctx.newmv_ctx(16, 16), 5);
     }
 
     #[test]
     fn newmv_ctx_intra_neighbor_not_counted() {
-        let mut ctx = TileContext::new(64);
+        let mut ctx = TileContext::new(64, 128);
         ctx.above_intra[16] = true;
         assert_eq!(ctx.newmv_ctx(16, 16), 3);
     }
 
     #[test]
     fn newmv_ctx_neighbor_used_newmv_one_side() {
-        let mut ctx = TileContext::new(64);
+        let mut ctx = TileContext::new(64, 128);
         ctx.above_newmv[16] = true;
         assert_eq!(ctx.newmv_ctx(16, 16), 4);
     }
 
     #[test]
     fn newmv_ctx_neighbor_used_newmv_both_sides() {
-        let mut ctx = TileContext::new(64);
+        let mut ctx = TileContext::new(64, 128);
         ctx.above_newmv[16] = true;
         ctx.left_newmv[16] = true;
         assert_eq!(ctx.newmv_ctx(16, 16), 4);
@@ -4105,7 +4371,7 @@ mod tests {
 
     #[test]
     fn newmv_ctx_neighbor_used_newmv_left_only() {
-        let mut ctx = TileContext::new(32);
+        let mut ctx = TileContext::new(32, 128);
         ctx.above_intra[16] = false;
         ctx.left_intra[0] = false;
         ctx.left_newmv[0] = true;
@@ -4117,7 +4383,7 @@ mod tests {
         let mut pixels = FramePixels::solid(64, 64, 128, 128, 128);
         for row in 0..64u32 {
             for col in 0..64u32 {
-                pixels.y[(row * 64 + col) as usize] = (row * 4) as u8;
+                pixels.y[(row * 64 + col) as usize] = (row * 4) as u16;
             }
         }
         let reference = FramePixels::solid(64, 64, 128, 128, 128);
@@ -4148,7 +4414,7 @@ mod tests {
     #[test]
     fn quantize_dequantize_roundtrip() {
         let coeffs = vec![280i32, -176, 88, 0, -352, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let dq = crate::dequant::lookup_dequant(128);
+        let dq = crate::dequant::lookup_dequant(128, crate::BitDepth::Eight);
         let quant = quantize_coeffs(&coeffs, 16, dq.dc, dq.ac);
         let deq = dequantize_coeffs(&quant, 16, dq.dc, dq.ac);
         assert_eq!(deq[0], 280);
@@ -4325,7 +4591,7 @@ mod tests {
         let above = [128u8; 8];
         let left = [128u8; 8];
         let block = [128u8; 64];
-        let dq = crate::dequant::lookup_dequant(128);
+        let dq = crate::dequant::lookup_dequant(128, crate::BitDepth::Eight);
         let (mode, _) =
             select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
         assert_eq!(mode, 0);
@@ -4341,7 +4607,7 @@ mod tests {
                 block[r * 8 + c] = above[c];
             }
         }
-        let dq = crate::dequant::lookup_dequant(128);
+        let dq = crate::dequant::lookup_dequant(128, crate::BitDepth::Eight);
         let (mode, _) =
             select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
         assert_eq!(mode, 1);
@@ -4357,7 +4623,7 @@ mod tests {
                 block[r * 8 + c] = left[r];
             }
         }
-        let dq = crate::dequant::lookup_dequant(128);
+        let dq = crate::dequant::lookup_dequant(128, crate::BitDepth::Eight);
         let (mode, _) =
             select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
         assert_eq!(mode, 2);
@@ -4365,7 +4631,7 @@ mod tests {
 
     #[test]
     fn mode_context_initialized_to_dc() {
-        let ctx = TileContext::new(16);
+        let ctx = TileContext::new(16, 128);
         for &m in &ctx.above_mode {
             assert_eq!(m, 0);
         }
@@ -4378,7 +4644,7 @@ mod tests {
     fn rd_cost_zero_for_perfect_prediction() {
         let source = [128u8; 64];
         let prediction = [128u8; 64];
-        let dq = crate::dequant::lookup_dequant(128);
+        let dq = crate::dequant::lookup_dequant(128, crate::BitDepth::Eight);
         let cost = compute_rd_cost(&source, &prediction, dq.dc, dq.ac, dct::TxType::DctDct);
         assert_eq!(cost, 0);
     }
@@ -4396,7 +4662,7 @@ mod tests {
         for i in 0..64 {
             bad_pred[i] = 255 - source[i];
         }
-        let dq = crate::dequant::lookup_dequant(128);
+        let dq = crate::dequant::lookup_dequant(128, crate::BitDepth::Eight);
         let good_cost = compute_rd_cost(&source, &good_pred, dq.dc, dq.ac, dct::TxType::DctDct);
         let bad_cost = compute_rd_cost(&source, &bad_pred, dq.dc, dq.ac, dct::TxType::DctDct);
         assert!(good_cost < bad_cost);
@@ -4520,7 +4786,7 @@ mod tests {
         let dx = DR_INTRA_DERIVATIVE[22] as i32;
         let d45_pred = predict_directional_z1(&above, 8, 8, dx);
         block.copy_from_slice(&d45_pred);
-        let dq = crate::dequant::lookup_dequant(128);
+        let dq = crate::dequant::lookup_dequant(128, crate::BitDepth::Eight);
         let (mode, _) =
             select_best_intra_mode(&block, &above, &left, 128, true, true, 8, 8, dq.dc, dq.ac);
         assert!((0..=12).contains(&mode));
@@ -4557,7 +4823,7 @@ mod tests {
         let mut pixels = FramePixels::solid(64, 64, 128, 128, 128);
         for row in 0..64u32 {
             for col in 0..64u32 {
-                pixels.y[(row * 64 + col) as usize] = ((row + col) * 2).min(255) as u8;
+                pixels.y[(row * 64 + col) as usize] = ((row + col) * 2).min(255) as u16;
             }
         }
         let bytes = encode_tile(&pixels);

@@ -1,3 +1,5 @@
+use crate::video::BitDepth;
+
 #[derive(Clone, Copy)]
 pub struct DequantValues {
     pub dc: u32,
@@ -263,12 +265,17 @@ const DQ_TABLE_8BIT: [[u16; 2]; 256] = [
     [1336, 1828],
 ];
 
-pub fn lookup_dequant(base_q_idx: u8) -> DequantValues {
+pub fn lookup_dequant(base_q_idx: u8, bit_depth: BitDepth) -> DequantValues {
     let entry = DQ_TABLE_8BIT[base_q_idx as usize];
-    DequantValues {
+    let mut out = DequantValues {
         dc: entry[0] as u32,
         ac: entry[1] as u32,
+    };
+    if bit_depth == BitDepth::Ten {
+        out.dc *= 4;
+        out.ac *= 4;
     }
+    out
 }
 
 #[cfg(test)]
@@ -277,21 +284,21 @@ mod tests {
 
     #[test]
     fn q128_matches_previous_hardcoded_values() {
-        let dq = lookup_dequant(128);
+        let dq = lookup_dequant(128, BitDepth::Eight);
         assert_eq!(dq.dc, 140);
         assert_eq!(dq.ac, 176);
     }
 
     #[test]
     fn q0_is_lowest_dequant() {
-        let dq = lookup_dequant(0);
+        let dq = lookup_dequant(0, BitDepth::Eight);
         assert_eq!(dq.dc, 4);
         assert_eq!(dq.ac, 4);
     }
 
     #[test]
     fn q255_is_highest_dequant() {
-        let dq = lookup_dequant(255);
+        let dq = lookup_dequant(255, BitDepth::Eight);
         assert_eq!(dq.dc, 1336);
         assert_eq!(dq.ac, 1828);
     }
@@ -299,10 +306,18 @@ mod tests {
     #[test]
     fn dequant_increases_monotonically() {
         for i in 1..=255u8 {
-            let prev = lookup_dequant(i - 1);
-            let curr = lookup_dequant(i);
+            let prev = lookup_dequant(i - 1, BitDepth::Eight);
+            let curr = lookup_dequant(i, BitDepth::Eight);
             assert!(curr.dc >= prev.dc, "DC not monotonic at q_idx={}", i);
             assert!(curr.ac >= prev.ac, "AC not monotonic at q_idx={}", i);
         }
+    }
+
+    #[test]
+    fn ten_bit_scales_up_from_eight_bit() {
+        let dq8 = lookup_dequant(128, BitDepth::Eight);
+        let dq10 = lookup_dequant(128, BitDepth::Ten);
+        assert_eq!(dq10.dc, dq8.dc * 4);
+        assert_eq!(dq10.ac, dq8.ac * 4);
     }
 }

@@ -2,13 +2,15 @@ use crate::EncodeConfig;
 use crate::dequant;
 use crate::error::EncoderError;
 use crate::frame;
+use crate::metadata;
 use crate::obu;
 use crate::packet::{FrameType, Packet};
 use crate::rc::RateControl;
 use crate::sequence;
+use crate::video::{ContentLightLevel, MasteringDisplayMetadata, VideoSignal};
 use crate::y4m::FramePixels;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EncoderConfig {
     pub base_q_idx: u8,
     pub keyint: usize,
@@ -16,6 +18,9 @@ pub struct EncoderConfig {
     pub fps: f64,
     pub b_frames: bool,
     pub gop_size: usize,
+    pub video_signal: VideoSignal,
+    pub content_light: Option<ContentLightLevel>,
+    pub mastering_display: Option<MasteringDisplayMetadata>,
 }
 
 impl From<&EncodeConfig> for EncoderConfig {
@@ -27,6 +32,9 @@ impl From<&EncodeConfig> for EncoderConfig {
             fps: c.fps,
             b_frames: c.b_frames,
             gop_size: c.gop_size,
+            video_signal: c.video_signal,
+            content_light: c.content_light,
+            mastering_display: c.mastering_display,
         }
     }
 }
@@ -59,6 +67,22 @@ impl Encoder {
             return Err(EncoderError::InvalidDimensions { width, height });
         }
 
+        if (config.content_light.is_some() || config.mastering_display.is_some())
+            && config.video_signal.bit_depth.bits() != 10
+        {
+            return Err(EncoderError::InvalidHdrMetadata {
+                reason: "HDR metadata requires 10-bit signal",
+            });
+        }
+
+        if (config.content_light.is_some() || config.mastering_display.is_some())
+            && config.video_signal.color_description.is_none()
+        {
+            return Err(EncoderError::InvalidHdrMetadata {
+                reason: "HDR metadata requires color description signaling",
+            });
+        }
+
         let rate_ctrl = config
             .target_bitrate
             .map(|bitrate| RateControl::new(bitrate, config.fps, width, height, config.keyint));
@@ -85,8 +109,41 @@ impl Encoder {
     }
 
     pub fn headers(&self) -> Vec<u8> {
-        let seq = sequence::encode_sequence_header(self.width, self.height);
-        obu::obu_wrap(obu::ObuType::SequenceHeader, &seq)
+        let seq =
+            sequence::encode_sequence_header(self.width, self.height, &self.config.video_signal);
+        let mut out = obu::obu_wrap(obu::ObuType::SequenceHeader, &seq);
+        for m in self.metadata_obus() {
+            out.extend_from_slice(&m);
+        }
+        out
+    }
+
+    fn metadata_obus(&self) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        if let Some(cll) = self.config.content_light {
+            let payload = metadata::encode_hdr_cll(&cll);
+            out.push(obu::obu_wrap(obu::ObuType::Metadata, &payload));
+        }
+        if let Some(mdcv) = self.config.mastering_display {
+            let payload = metadata::encode_hdr_mdcv(&mdcv);
+            out.push(obu::obu_wrap(obu::ObuType::Metadata, &payload));
+        }
+        out
+    }
+
+    fn temporal_unit_headers(&self) -> Vec<u8> {
+        let td = obu::obu_wrap(obu::ObuType::TemporalDelimiter, &[]);
+        let seq = obu::obu_wrap(
+            obu::ObuType::SequenceHeader,
+            &sequence::encode_sequence_header(self.width, self.height, &self.config.video_signal),
+        );
+        let mut out = Vec::new();
+        out.extend_from_slice(&td);
+        out.extend_from_slice(&seq);
+        for m in self.metadata_obus() {
+            out.extend_from_slice(&m);
+        }
+        out
     }
 
     pub fn send_frame(&mut self, pixels: &FramePixels) -> Result<(), EncoderError> {
@@ -96,6 +153,25 @@ impl Encoder {
                 expected_h: self.height,
                 got_w: pixels.width,
                 got_h: pixels.height,
+            });
+        }
+        let expected = self.config.video_signal.bit_depth.bits();
+        let got = pixels.bit_depth.bits();
+        if expected != got {
+            return Err(EncoderError::FrameBitDepthMismatch { expected, got });
+        }
+        let max_value = self.config.video_signal.bit_depth.max_value();
+        if let Some(sample) = pixels
+            .y
+            .iter()
+            .chain(pixels.u.iter())
+            .chain(pixels.v.iter())
+            .copied()
+            .find(|&s| s > max_value)
+        {
+            return Err(EncoderError::SampleOutOfRange {
+                bit_depth: expected,
+                sample,
             });
         }
 
@@ -160,13 +236,7 @@ impl Encoder {
                 None => self.config.base_q_idx,
             }
         };
-        let dq = dequant::lookup_dequant(base_q_idx);
-
-        let td = obu::obu_wrap(obu::ObuType::TemporalDelimiter, &[]);
-        let seq = obu::obu_wrap(
-            obu::ObuType::SequenceHeader,
-            &sequence::encode_sequence_header(self.width, self.height),
-        );
+        let dq = dequant::lookup_dequant(base_q_idx, self.config.video_signal.bit_depth);
 
         let (frame_payload, recon) = if is_keyframe {
             frame::encode_frame_with_recon(pixels, base_q_idx, dq)
@@ -191,8 +261,7 @@ impl Encoder {
 
         let mut data = Vec::new();
         if emit_tu_headers {
-            data.extend_from_slice(&td);
-            data.extend_from_slice(&seq);
+            data.extend_from_slice(&self.temporal_unit_headers());
         }
         data.extend_from_slice(&frm);
 
@@ -350,33 +419,19 @@ impl Encoder {
         // Then output remaining B-frames with their original display-order indices
         // Since they had emit_tu_headers=false, we MUST prepend TU headers to them!
         for mut b_pkt in b_packets {
-            let td = obu::obu_wrap(obu::ObuType::TemporalDelimiter, &[]);
-            let seq = obu::obu_wrap(
-                obu::ObuType::SequenceHeader,
-                &sequence::encode_sequence_header(self.width, self.height),
-            );
-            let mut tu_data = Vec::new();
-            tu_data.extend_from_slice(&td);
-            tu_data.extend_from_slice(&seq);
+            let mut tu_data = self.temporal_unit_headers();
             tu_data.extend_from_slice(&b_pkt.data);
             b_pkt.data = tu_data;
             self.pending_packets.push_back(b_pkt);
         }
 
         // Output show_existing_frame to display the hidden P-frame at its correct position
-        let td = obu::obu_wrap(obu::ObuType::TemporalDelimiter, &[]);
-        let seq = obu::obu_wrap(
-            obu::ObuType::SequenceHeader,
-            &sequence::encode_sequence_header(self.width, self.height),
-        );
         let show_hdr = obu::obu_wrap(
             obu::ObuType::FrameHeader,
             &frame::encode_show_existing_frame(alt_slot),
         );
 
-        let mut show_pkt_data = Vec::new();
-        show_pkt_data.extend_from_slice(&td);
-        show_pkt_data.extend_from_slice(&seq);
+        let mut show_pkt_data = self.temporal_unit_headers();
         show_pkt_data.extend_from_slice(&show_hdr);
 
         let show_pkt = Packet {
@@ -417,6 +472,9 @@ mod tests {
             fps: 25.0,
             b_frames: false,
             gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
         };
         let enc = Encoder::new(64, 64, config);
         assert!(enc.is_ok());
@@ -434,6 +492,9 @@ mod tests {
             fps: 25.0,
             b_frames: false,
             gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
         };
         assert!(Encoder::new(1, 1, config).is_ok());
     }
@@ -447,6 +508,9 @@ mod tests {
             fps: 25.0,
             b_frames: false,
             gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
         };
         assert!(Encoder::new(4096, 2304, config).is_ok());
     }
@@ -460,6 +524,9 @@ mod tests {
             fps: 25.0,
             b_frames: false,
             gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
         };
         let result = Encoder::new(0, 64, config);
         assert!(result.is_err());
@@ -481,6 +548,9 @@ mod tests {
             fps: 25.0,
             b_frames: false,
             gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
         };
         assert!(Encoder::new(4097, 64, config).is_err());
     }
@@ -494,6 +564,9 @@ mod tests {
             fps: 25.0,
             b_frames: false,
             gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
         };
         assert!(Encoder::new(64, 0, config).is_err());
     }
@@ -507,6 +580,9 @@ mod tests {
             fps: 25.0,
             b_frames: false,
             gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
         };
         assert!(Encoder::new(64, 2305, config).is_err());
     }
@@ -520,6 +596,9 @@ mod tests {
             fps: 25.0,
             b_frames: false,
             gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
         };
         let mut enc = Encoder::new(64, 64, config).unwrap();
         let frame = FramePixels::solid(64, 64, 128, 128, 128);
@@ -546,6 +625,9 @@ mod tests {
             fps: 25.0,
             b_frames: false,
             gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
         };
         let mut enc = Encoder::new(64, 64, config).unwrap();
         let frame = FramePixels::solid(64, 64, 128, 128, 128);
@@ -565,6 +647,9 @@ mod tests {
             fps: 25.0,
             b_frames: false,
             gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
         };
         let mut enc = Encoder::new(64, 64, config).unwrap();
         let frame = FramePixels::solid(64, 64, 128, 128, 128);
@@ -589,6 +674,9 @@ mod tests {
             fps: 25.0,
             b_frames: false,
             gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
         };
         let mut enc = Encoder::new(64, 64, config).unwrap();
         let frame = FramePixels::solid(64, 64, 128, 128, 128);
@@ -628,6 +716,9 @@ mod tests {
             fps: 25.0,
             b_frames: false,
             gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
         };
         let mut enc = Encoder::new(64, 64, config).unwrap();
         let wrong_frame = FramePixels::solid(128, 128, 128, 128, 128);
@@ -659,6 +750,9 @@ mod tests {
             fps: 25.0,
             b_frames: false,
             gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
         };
         let mut enc = Encoder::new(64, 64, config).unwrap();
         enc.flush();
@@ -674,6 +768,9 @@ mod tests {
             fps: 25.0,
             b_frames: false,
             gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
         };
         let enc = Encoder::new(64, 64, config).unwrap();
         let headers = enc.headers();
@@ -690,6 +787,9 @@ mod tests {
             fps: 25.0,
             b_frames: false,
             gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
         };
         let mut enc = Encoder::new(64, 64, config).unwrap();
         let frame = FramePixels::solid(64, 64, 128, 128, 128);
@@ -711,6 +811,9 @@ mod tests {
             fps: 25.0,
             b_frames: false,
             gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
         };
         let mut enc = Encoder::new(64, 64, config).unwrap();
         let frame = FramePixels::solid(64, 64, 128, 128, 128);
@@ -733,6 +836,9 @@ mod tests {
             fps: 25.0,
             b_frames: false,
             gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
         };
         let mut enc = Encoder::new(64, 64, config).unwrap();
         let frame = FramePixels::solid(64, 64, 128, 128, 128);
@@ -762,11 +868,58 @@ mod tests {
             fps: 30.0,
             b_frames: false,
             gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
         };
         let config: EncoderConfig = (&ec).into();
         assert_eq!(config.base_q_idx, 100);
         assert_eq!(config.keyint, 10);
         assert_eq!(config.target_bitrate, Some(1_000_000));
         assert!((config.fps - 30.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn hdr_metadata_requires_10bit_signal() {
+        let config = EncoderConfig {
+            base_q_idx: 128,
+            keyint: 25,
+            target_bitrate: None,
+            fps: 25.0,
+            b_frames: false,
+            gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: Some(ContentLightLevel {
+                max_content_light_level: 1000,
+                max_frame_average_light_level: 400,
+            }),
+            mastering_display: None,
+        };
+        let err = Encoder::new(64, 64, config).unwrap_err();
+        assert!(matches!(err, EncoderError::InvalidHdrMetadata { .. }));
+    }
+
+    #[test]
+    fn hdr_metadata_requires_color_description() {
+        let config = EncoderConfig {
+            base_q_idx: 128,
+            keyint: 25,
+            target_bitrate: None,
+            fps: 25.0,
+            b_frames: false,
+            gop_size: 3,
+            video_signal: VideoSignal {
+                bit_depth: crate::BitDepth::Ten,
+                color_range: crate::ColorRange::Limited,
+                color_description: None,
+            },
+            content_light: Some(ContentLightLevel {
+                max_content_light_level: 1000,
+                max_frame_average_light_level: 400,
+            }),
+            mastering_display: None,
+        };
+        let err = Encoder::new(64, 64, config).unwrap_err();
+        assert!(matches!(err, EncoderError::InvalidHdrMetadata { .. }));
     }
 }

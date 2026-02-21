@@ -4,6 +4,7 @@ pub enum ObuType {
     SequenceHeader = 1,
     TemporalDelimiter = 2,
     FrameHeader = 3,
+    Metadata = 5,
     Frame = 6,
 }
 

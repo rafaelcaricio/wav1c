@@ -37,14 +37,14 @@ fn hadamard_4x4(residual: &[i32], stride: usize) -> [i32; 16] {
 /// Computes SATD (Sum of Absolute Transformed Differences) for a block
 /// Uses 4x4 Hadamard transforms as the base unit to approximate the energy.
 pub fn compute_satd(
-    source: &[u8],
-    prediction: &[u8],
+    source: &[u16],
+    prediction: &[u16],
     width: usize,
     height: usize,
     src_stride: usize,
     pred_stride: usize,
-) -> u32 {
-    let mut satd = 0u32;
+) -> u64 {
+    let mut satd = 0u64;
     // For small blocks, just sum SAD (e.g. 4x4, 8x4 etc.)
     // We break everything into 4x4 chunks. If a block is not a multiple of 4, we use SAD.
     if !width.is_multiple_of(4) || !height.is_multiple_of(4) {
@@ -52,7 +52,7 @@ pub fn compute_satd(
             for x in 0..width {
                 let diff =
                     (source[y * src_stride + x] as i32) - (prediction[y * pred_stride + x] as i32);
-                satd += diff.unsigned_abs();
+                satd += diff.unsigned_abs() as u64;
             }
         }
         return satd;
@@ -69,9 +69,9 @@ pub fn compute_satd(
             }
 
             let transformed = hadamard_4x4(&residual, 4);
-            let mut chunk_satd = 0u32;
+            let mut chunk_satd = 0u64;
             for &coeff in transformed.iter() {
-                chunk_satd += coeff.unsigned_abs();
+                chunk_satd += coeff.unsigned_abs() as u64;
             }
             // Scale down to match SD range roughly
             satd += chunk_satd / 2;
@@ -87,15 +87,15 @@ mod tests {
 
     #[test]
     fn test_compute_satd_identical() {
-        let src = [0u8; 64];
-        let pred = [0u8; 64];
+        let src = [0u16; 64];
+        let pred = [0u16; 64];
         assert_eq!(compute_satd(&src, &pred, 8, 8, 8, 8), 0);
     }
 
     #[test]
     fn test_compute_satd_diff() {
-        let mut src = [0u8; 16];
-        let pred = [0u8; 16];
+        let mut src = [0u16; 16];
+        let pred = [0u16; 16];
         src[0] = 10;
         src[1] = 10;
 
