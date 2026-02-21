@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bitwriter;
+pub mod cdef;
 pub mod cdf;
 pub mod cdf_coef;
 pub mod dequant;
@@ -11,7 +12,9 @@ pub mod ivf;
 pub mod msac;
 pub mod obu;
 pub mod packet;
+pub mod rdo;
 pub mod rc;
+pub mod satd;
 pub mod sequence;
 pub mod tile;
 pub mod y4m;

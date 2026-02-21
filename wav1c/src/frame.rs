@@ -53,7 +53,16 @@ pub fn encode_frame_with_recon(
     w.write_bit(true);
 
     let mut header_bytes = w.finalize();
-    let (tile_data, recon) = crate::tile::encode_tile_with_recon(pixels, dq, base_q_idx);
+    let (tile_data, mut recon) = crate::tile::encode_tile_with_recon(pixels, dq, base_q_idx);
+
+    let (damping_minus_3, y_strength, _uv_strength) = cdef_strength_for_qidx(base_q_idx);
+    crate::cdef::apply_cdef_frame(
+        &mut recon,
+        (y_strength >> 2) as i32,
+        (y_strength & 3) as i32,
+        (damping_minus_3 + 3) as i32,
+    );
+
     header_bytes.extend_from_slice(&tile_data);
     (header_bytes, recon)
 }
@@ -86,8 +95,15 @@ fn write_quant_params(w: &mut BitWriter, base_q_idx: u8) {
     w.write_bit(false);
 }
 
-fn cdef_strength_for_qidx(_base_q_idx: u8) -> (u8, u8, u8) {
-    (0, 0, 0)
+fn cdef_strength_for_qidx(base_q_idx: u8) -> (u8, u8, u8) {
+    if base_q_idx < 64 {
+        (0, 0, 0)
+    } else {
+        let pri = (base_q_idx as u32 / 16).clamp(1, 15) as u8;
+        let y_strength = pri << 2; // sec = 0
+        let uv_strength = pri << 2; // sec = 0
+        (2, y_strength, uv_strength) // damping = 5
+    }
 }
 
 fn write_cdef_params(w: &mut BitWriter, base_q_idx: u8) {
@@ -186,7 +202,16 @@ pub fn encode_inter_frame_with_recon(
     }
 
     let mut header_bytes = w.finalize();
-    let (tile_data, recon) = crate::tile::encode_inter_tile_with_recon(pixels, reference, dq, base_q_idx);
+    let (tile_data, mut recon) = crate::tile::encode_inter_tile_with_recon(pixels, reference, dq, base_q_idx);
+
+    let (damping_minus_3, y_strength, _uv_strength) = cdef_strength_for_qidx(base_q_idx);
+    crate::cdef::apply_cdef_frame(
+        &mut recon,
+        (y_strength >> 2) as i32,
+        (y_strength & 3) as i32,
+        (damping_minus_3 + 3) as i32,
+    );
+
     header_bytes.extend_from_slice(&tile_data);
     (header_bytes, recon)
 }
@@ -197,10 +222,8 @@ mod tests {
 
     #[test]
     fn cdef_strength_mapping() {
-        for q in 0..=255u8 {
-            let (d, y, uv) = cdef_strength_for_qidx(q);
-            assert_eq!((d, y, uv), (0, 0, 0));
-        }
+        assert_eq!(cdef_strength_for_qidx(0), (0, 0, 0));
+        assert_ne!(cdef_strength_for_qidx(128), (0, 0, 0));
     }
 
     #[test]
@@ -254,10 +277,10 @@ mod tests {
         expected.write_bit(true);
         expected.write_bit(false);
 
+        expected.write_bits(2, 2);
         expected.write_bits(0, 2);
-        expected.write_bits(0, 2);
-        expected.write_bits(0, 6);
-        expected.write_bits(0, 6);
+        expected.write_bits(32, 6);
+        expected.write_bits(32, 6);
 
         expected.write_bit(false);
         expected.write_bit(true);
@@ -327,10 +350,10 @@ mod tests {
         expected.write_bit(true);
         expected.write_bit(false);
 
+        expected.write_bits(2, 2);
         expected.write_bits(0, 2);
-        expected.write_bits(0, 2);
-        expected.write_bits(0, 6);
-        expected.write_bits(0, 6);
+        expected.write_bits(32, 6);
+        expected.write_bits(32, 6);
 
         expected.write_bit(false);
         expected.write_bit(true);
@@ -387,10 +410,10 @@ mod tests {
         expected.write_bit(true);
         expected.write_bit(false);
 
+        expected.write_bits(2, 2);
         expected.write_bits(0, 2);
-        expected.write_bits(0, 2);
-        expected.write_bits(0, 6);
-        expected.write_bits(0, 6);
+        expected.write_bits(32, 6);
+        expected.write_bits(32, 6);
 
         expected.write_bit(false);
         expected.write_bit(false);

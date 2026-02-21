@@ -5,7 +5,7 @@ use crate::y4m::FramePixels;
 use std::cmp::min;
 
 #[path = "dct.rs"]
-mod dct;
+pub mod dct;
 #[path = "scan.rs"]
 mod scan;
 
@@ -493,64 +493,66 @@ fn select_best_intra_mode(
     ac_dq: u32,
 ) -> (u8, i8) {
     let dc = predict_dc(above, left, have_above, have_left, w, h);
-    let mut best_mode = 0u8;
-    let mut best_delta = 0i8;
-    let mut best_cost = compute_rd_cost(source, &dc, dc_dq, ac_dq, dct::TxType::DctDct);
+    let best_delta = 0i8;
+
+    // SATD is linear (sum of absolute differences). Thus lambda should be proportional to Q, not Q^2.
+    // ac_dq is the AC quantization step size. For SATD, a linear scaling works well.
+    let lambda = 0; // Fast RDO lambda
+
+
+    let mut candidates = Vec::new();
+
+    let dc_satd = crate::satd::compute_satd(source, &dc, w, h, w, w);
+    candidates.push((0, dc, crate::rdo::calculate_rd_cost(dc_satd, crate::rdo::estimate_intra_mode_bits(0), lambda)));
 
     if have_above {
         let v = predict_v(above, w, h);
-        let cost = compute_rd_cost(source, &v, dc_dq, ac_dq, dct::TxType::DctDct);
-        if cost < best_cost {
-            best_cost = cost;
-            best_mode = 1;
-            best_delta = 0;
-        }
+        let satd = crate::satd::compute_satd(source, &v, w, h, w, w);
+        candidates.push((1, v, crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(1), lambda)));
     }
 
     if have_left {
         let hp = predict_h(left, w, h);
-        let cost = compute_rd_cost(source, &hp, dc_dq, ac_dq, dct::TxType::DctDct);
-        if cost < best_cost {
-            best_cost = cost;
-            best_mode = 2;
-            best_delta = 0;
-        }
+        let satd = crate::satd::compute_satd(source, &hp, w, h, w, w);
+        candidates.push((2, hp, crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(2), lambda)));
     }
+
     if have_above && have_left {
         let smooth = predict_smooth(above, left, w, h);
-        let cost = compute_rd_cost(source, &smooth, dc_dq, ac_dq, dct::TxType::DctDct);
-        if cost < best_cost {
-            best_cost = cost;
-            best_mode = 9;
-            best_delta = 0;
-        }
+        let satd = crate::satd::compute_satd(source, &smooth, w, h, w, w);
+        candidates.push((9, smooth, crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(9), lambda)));
 
         let sv = predict_smooth_v(above, left, w, h);
-        let cost = compute_rd_cost(source, &sv, dc_dq, ac_dq, dct::TxType::DctDct);
-        if cost < best_cost {
-            best_cost = cost;
-            best_mode = 10;
-            best_delta = 0;
-        }
+        let satd = crate::satd::compute_satd(source, &sv, w, h, w, w);
+        candidates.push((10, sv, crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(10), lambda)));
 
         let sh = predict_smooth_h(above, left, w, h);
-        let cost = compute_rd_cost(source, &sh, dc_dq, ac_dq, dct::TxType::DctDct);
-        if cost < best_cost {
-            best_cost = cost;
-            best_mode = 11;
-            best_delta = 0;
-        }
+        let satd = crate::satd::compute_satd(source, &sh, w, h, w, w);
+        candidates.push((11, sh, crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(11), lambda)));
 
         let paeth = predict_paeth(above, left, top_left, w, h);
-        let cost = compute_rd_cost(source, &paeth, dc_dq, ac_dq, dct::TxType::DctDct);
-        if cost < best_cost {
-            best_mode = 12;
-            best_delta = 0;
+        let satd = crate::satd::compute_satd(source, &paeth, w, h, w, w);
+        candidates.push((12, paeth, crate::rdo::calculate_rd_cost(satd, crate::rdo::estimate_intra_mode_bits(12), lambda)));
+    }
+
+    // Sort by Fast RDO cost
+    candidates.sort_by_key(|&(_, _, cost)| cost);
+
+    // True RDO Refinement on Top 2 (or all if very few valid modes exist)
+    let best_n = std::cmp::min(2, candidates.len());
+    let mut exact_best_mode = candidates[0].0;
+    let mut exact_best_cost = u64::MAX;
+
+    for i in 0..best_n {
+        let (mode, ref pred, _) = candidates[i];
+        let real_cost = compute_rd_cost(source, pred, dc_dq, ac_dq, dct::TxType::DctDct);
+        if real_cost < exact_best_cost {
+            exact_best_cost = real_cost;
+            exact_best_mode = mode;
         }
     }
 
-
-    (best_mode, best_delta)
+    (exact_best_mode, best_delta)
 }
 
 fn select_best_txtype(source: &[u8], prediction: &[u8], dc_dq: u32, ac_dq: u32) -> dct::TxType {
@@ -899,15 +901,6 @@ fn interpolate_block(
     output
 }
 
-fn compute_block_sad(source: &[u8], predicted: &[u8]) -> u32 {
-    source
-        .iter()
-        .zip(predicted.iter())
-        .map(|(&s, &p)| (s as i32 - p as i32).unsigned_abs())
-        .sum()
-}
-
-#[allow(clippy::too_many_arguments)]
 fn subpel_refine(
     source: &[u8],
     reference: &[u8],
@@ -932,18 +925,24 @@ fn subpel_refine(
         b
     };
 
-    let eval = |mv_x: i32, mv_y: i32| -> u32 {
+    let eval = |mv_x: i32, mv_y: i32| -> u64 {
         let int_x = px_x as i32 + (mv_x >> 3);
         let int_y = px_y as i32 + (mv_y >> 3);
         let phase_x = (mv_x & 7) as u32;
         let phase_y = (mv_y & 7) as u32;
         let pred = interpolate_block(reference, width, height, int_x, int_y, phase_x, phase_y, block_size);
-        compute_block_sad(&src_block, &pred)
+        
+        let mut ssd = 0u64;
+        for i in 0..src_block.len() {
+            let diff = src_block[i] as i64 - pred[i] as i64;
+            ssd += (diff * diff) as u64;
+        }
+        ssd
     };
 
     let mut bx = best_mv_x;
     let mut by = best_mv_y;
-    let mut best_sad = eval(bx, by);
+    let mut best_ssd = eval(bx, by);
 
     for &step in &[4i32, 2] {
         for &(dx, dy) in &[
@@ -952,11 +951,11 @@ fn subpel_refine(
         ] {
             let cx = bx + dx;
             let cy = by + dy;
-            let sad = eval(cx, cy);
-            let new_cost = cx.abs() + cy.abs();
-            let old_cost = bx.abs() + by.abs();
-            if sad < best_sad || (sad == best_sad && new_cost < old_cost) {
-                best_sad = sad;
+            let ssd = eval(cx, cy);
+            let new_cost = (cx.abs() + cy.abs()) as u64;
+            let old_cost = (bx.abs() + by.abs()) as u64;
+            if ssd < best_ssd || (ssd == best_ssd && new_cost < old_cost) {
+                best_ssd = ssd;
                 bx = cx;
                 by = cy;
             }
@@ -2277,10 +2276,10 @@ impl<'a> TileEncoder<'a> {
     fn should_use_partition_none(&self, bx: u32, by: u32, bl: usize) -> bool {
         let base = self.dq.ac as u64 * self.dq.ac as u64;
         let divisor = match bl {
-            1 => 16,
-            2 => 32,
-            3 => 48,
-            _ => 64,
+            1 => 8,
+            2 => 16,
+            3 => 24,
+            _ => 32,
         };
         self.skip_mse(bx, by, bl) <= base / divisor
     }
@@ -2494,6 +2493,7 @@ struct InterTileEncoder<'a> {
     pixels: &'a FramePixels,
     reference: &'a FramePixels,
     dq: DequantValues,
+    base_q_idx: u8,
     recon: FramePixels,
     block_mvs: Vec<BlockMv>,
 }
@@ -2515,6 +2515,7 @@ impl<'a> InterTileEncoder<'a> {
             pixels,
             reference,
             dq,
+            base_q_idx,
             recon: FramePixels {
                 width: pixels.width,
                 height: pixels.height,
@@ -2544,14 +2545,10 @@ impl<'a> InterTileEncoder<'a> {
             &self.pixels.y, &self.reference.y, w, h, px_x, px_y, 8,
         );
 
-        let (refined_mv_x, refined_mv_y) = if dx_pixels != 0 || dy_pixels != 0 {
-            subpel_refine(
-                &self.pixels.y, &self.reference.y, w, h, px_x, px_y, 8,
-                dx_pixels * 8, dy_pixels * 8,
-            )
-        } else {
-            (0, 0)
-        };
+        let (refined_mv_x, refined_mv_y) = subpel_refine(
+            &self.pixels.y, &self.reference.y, w, h, px_x, px_y, 8,
+            dx_pixels * 8, dy_pixels * 8,
+        );
 
         let (pred_x, pred_y, mv_candidates) = predict_mv(
             &self.block_mvs, self.mi_cols, self.mi_rows, bx, by,
@@ -2888,32 +2885,52 @@ impl<'a> InterTileEncoder<'a> {
             .update_newmv_flag(bx, by, bl, self.mi_cols, self.mi_rows, use_newmv);
     }
 
-    fn inter_skip_mse(&self, bx: u32, by: u32, bl: usize) -> u64 {
+    fn should_use_inter_partition_none(&self, bx: u32, by: u32, bl: usize) -> bool {
+        let block_size = 1u32 << (7 - bl);
         let px_x = bx * 4;
         let px_y = by * 4;
-        let block_size = 1u32 << (7 - bl);
         let w = self.pixels.width;
         let h = self.pixels.height;
-
-        let mut sse = 0u64;
-        let mut count = 0u64;
-        for r in 0..block_size {
-            for c in 0..block_size {
-                let sy = min(px_y + r, h - 1);
-                let sx = min(px_x + c, w - 1);
+        
+        // Fast SATD extraction for inter blocks
+        let bs = block_size as usize;
+        let mut src_block = vec![0u8; bs * bs];
+        let mut ref_block = vec![0u8; bs * bs];
+        for r in 0..bs {
+            for c in 0..bs {
+                let sy = std::cmp::min(px_y + r as u32, h - 1);
+                let sx = std::cmp::min(px_x + c as u32, w - 1);
                 let idx = (sy * w + sx) as usize;
-                let diff = self.pixels.y[idx] as i64 - self.reference.y[idx] as i64;
-                sse += (diff * diff) as u64;
-                count += 1;
+                src_block[r * bs + c] = self.pixels.y[idx];
+                ref_block[r * bs + c] = self.reference.y[idx];
             }
         }
+        
+        let satd = if bs >= 4 && (bs == 4 || bs == 8 || bs == 16 || bs == 32 || bs == 64) {
+            crate::satd::compute_satd(&src_block, &ref_block, bs, bs, bs, bs)
+        } else {
+            // fallback
+            let mut sad = 0;
+            for i in 0..bs*bs {
+                sad += (src_block[i] as i32 - ref_block[i] as i32).unsigned_abs();
+            }
+            sad
+        };
 
-        sse / count.max(1)
-    }
-
-    fn should_use_inter_partition_none(&self, bx: u32, by: u32, bl: usize) -> bool {
-        let threshold = (self.dq.ac as u64 * self.dq.ac as u64) / 64;
-        self.inter_skip_mse(bx, by, bl) <= threshold
+        let base = self.dq.ac as u64;
+        let threshold = match bl {
+            1 => base * 2,
+            2 => base * 4,
+            3 => base * 6,
+            _ => base * 8,
+        };
+        
+        // Zero SATD is a perfect match (e.g. solid colors), always skip.
+        if satd == 0 {
+            true
+        } else {
+            (satd as u64) <= threshold
+        }
     }
 
     fn encode_inter_skip_block(&mut self, bx: u32, by: u32, bl: usize) {
@@ -3219,8 +3236,8 @@ fn motion_search_block(
     let mut best_sad: u32 = u32::MAX;
     let mut best_cost: i32 = 0;
 
-    for dy in -16i32..=16 {
-        for dx in -16i32..=16 {
+    for dy in -32i32..=32 {
+        for dx in -32i32..=32 {
             let ref_x = px_x as i32 + dx;
             let ref_y = px_y as i32 + dy;
 
