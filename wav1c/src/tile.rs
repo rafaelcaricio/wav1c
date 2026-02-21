@@ -2891,30 +2891,46 @@ impl<'a> InterTileEncoder<'a> {
         let px_y = by * 4;
         let w = self.pixels.width;
         let h = self.pixels.height;
-        
         // Fast SATD extraction for inter blocks
         let bs = block_size as usize;
-        let mut src_block = vec![0u8; bs * bs];
-        let mut ref_block = vec![0u8; bs * bs];
-        for r in 0..bs {
-            for c in 0..bs {
-                let sy = std::cmp::min(px_y + r as u32, h - 1);
-                let sx = std::cmp::min(px_x + c as u32, w - 1);
-                let idx = (sy * w + sx) as usize;
-                src_block[r * bs + c] = self.pixels.y[idx];
-                ref_block[r * bs + c] = self.reference.y[idx];
+        let satd = if px_x + block_size <= w && px_y + block_size <= h {
+            // Zero-allocation fast path
+            let offset = (px_y * w + px_x) as usize;
+            if bs >= 4 && (bs == 4 || bs == 8 || bs == 16 || bs == 32 || bs == 64) {
+                crate::satd::compute_satd(&self.pixels.y[offset..], &self.reference.y[offset..], bs, bs, w as usize, w as usize)
+            } else {
+                let mut sad = 0;
+                for r in 0..bs {
+                    for c in 0..bs {
+                        let s = self.pixels.y[offset + r * w as usize + c] as i32;
+                        let ref_p = self.reference.y[offset + r * w as usize + c] as i32;
+                        sad += (s - ref_p).unsigned_abs();
+                    }
+                }
+                sad
             }
-        }
-        
-        let satd = if bs >= 4 && (bs == 4 || bs == 8 || bs == 16 || bs == 32 || bs == 64) {
-            crate::satd::compute_satd(&src_block, &ref_block, bs, bs, bs, bs)
         } else {
-            // fallback
-            let mut sad = 0;
-            for i in 0..bs*bs {
-                sad += (src_block[i] as i32 - ref_block[i] as i32).unsigned_abs();
+            // Edge fallback path with clamping
+            let mut src_block = vec![0u8; bs * bs];
+            let mut ref_block = vec![0u8; bs * bs];
+            for r in 0..bs {
+                for c in 0..bs {
+                    let sy = std::cmp::min(px_y + r as u32, h - 1);
+                    let sx = std::cmp::min(px_x + c as u32, w - 1);
+                    let idx = (sy * w + sx) as usize;
+                    src_block[r * bs + c] = self.pixels.y[idx];
+                    ref_block[r * bs + c] = self.reference.y[idx];
+                }
             }
-            sad
+            if bs >= 4 && (bs == 4 || bs == 8 || bs == 16 || bs == 32 || bs == 64) {
+                crate::satd::compute_satd(&src_block, &ref_block, bs, bs, bs, bs)
+            } else {
+                let mut sad = 0;
+                for i in 0..bs*bs {
+                    sad += (src_block[i] as i32 - ref_block[i] as i32).unsigned_abs();
+                }
+                sad
+            }
         };
 
         let base = self.dq.ac as u64;
@@ -3236,38 +3252,79 @@ fn motion_search_block(
     let mut best_sad: u32 = u32::MAX;
     let mut best_cost: i32 = 0;
 
-    for dy in -32i32..=32 {
-        for dx in -32i32..=32 {
-            let ref_x = px_x as i32 + dx;
-            let ref_y = px_y as i32 + dy;
+    let mut eval = |dx: i32, dy: i32| -> u32 {
+        let ref_x = px_x as i32 + dx;
+        let ref_y = px_y as i32 + dy;
 
-            if ref_x < 0
-                || ref_y < 0
-                || ref_x + block_size as i32 > width as i32
-                || ref_y + block_size as i32 > height as i32
-            {
+        if ref_x < 0
+            || ref_y < 0
+            || ref_x + block_size as i32 > width as i32
+            || ref_y + block_size as i32 > height as i32
+        {
+            return u32::MAX;
+        }
+
+        let mut sad: u32 = 0;
+        for row in 0..block_size {
+            let src_off = ((px_y + row) * width + px_x) as usize;
+            let ref_off = ((ref_y as u32 + row) * width + ref_x as u32) as usize;
+            for col in 0..block_size as usize {
+                let s = source[src_off + col] as i32;
+                let r = reference[ref_off + col] as i32;
+                sad += (s - r).unsigned_abs();
+            }
+        }
+        sad
+    };
+
+    best_sad = eval(0, 0);
+
+    let mut step = 16i32;
+    while step >= 1 {
+        let mut found_better = false;
+
+        let points = [
+            (best_dx - step, best_dy),
+            (best_dx + step, best_dy),
+            (best_dx, best_dy - step),
+            (best_dx, best_dy + step),
+            (best_dx - step, best_dy - step),
+            (best_dx + step, best_dy - step),
+            (best_dx - step, best_dy + step),
+            (best_dx + step, best_dy + step),
+        ];
+
+        let mut current_best_dx = best_dx;
+        let mut current_best_dy = best_dy;
+        let mut current_best_sad = best_sad;
+        let mut current_best_cost = best_cost;
+
+        for &(dx, dy) in &points {
+            if dx < -32 || dx > 32 || dy < -32 || dy > 32 {
                 continue;
             }
-
-            let mut sad: u32 = 0;
-            for row in 0..block_size {
-                let src_off = ((px_y + row) * width + px_x) as usize;
-                let ref_off = ((ref_y as u32 + row) * width + ref_x as u32) as usize;
-                for col in 0..block_size as usize {
-                    let s = source[src_off + col] as i32;
-                    let r = reference[ref_off + col] as i32;
-                    sad += (s - r).unsigned_abs();
-                }
+            let sad = eval(dx, dy);
+            if sad == u32::MAX {
+                continue;
             }
-
             let cost = dx.abs() + dy.abs();
 
-            if sad < best_sad || (sad == best_sad && cost < best_cost) {
-                best_sad = sad;
-                best_dx = dx;
-                best_dy = dy;
-                best_cost = cost;
+            if sad < current_best_sad || (sad == current_best_sad && cost < current_best_cost) {
+                current_best_sad = sad;
+                current_best_dx = dx;
+                current_best_dy = dy;
+                current_best_cost = cost;
+                found_better = true;
             }
+        }
+
+        if found_better {
+            best_sad = current_best_sad;
+            best_dx = current_best_dx;
+            best_dy = current_best_dy;
+            best_cost = current_best_cost;
+        } else {
+            step /= 2;
         }
     }
 
