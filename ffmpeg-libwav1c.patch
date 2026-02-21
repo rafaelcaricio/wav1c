@@ -60,10 +60,10 @@ index 042b07c895..d19aa5fec6 100644
  extern const FFCodec ff_libtwolame_encoder;
 diff --git a/libavcodec/libwav1c.c b/libavcodec/libwav1c.c
 new file mode 100644
-index 0000000000..34f4baf8c1
+index 0000000000..6372549309
 --- /dev/null
 +++ b/libavcodec/libwav1c.c
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,248 @@
 +/*
 + * wav1c AV1 encoder wrapper for FFmpeg
 + *
@@ -97,196 +97,218 @@ index 0000000000..34f4baf8c1
 +#include "encode.h"
 +
 +typedef enum {
-+    WAV1C_EOS_NOT_REACHED = 0,
-+    WAV1C_EOS_SENT,
-+    WAV1C_EOS_RECEIVED,
++  WAV1C_EOS_NOT_REACHED = 0,
++  WAV1C_EOS_SENT,
++  WAV1C_EOS_RECEIVED,
 +} Wav1cEosStatus;
 +
 +typedef struct Wav1cContext {
-+    AVClass *class;
-+    Wav1cEncoder *encoder;
-+    AVFrame *frame;
-+    Wav1cEosStatus eos_flag;
++  AVClass *class;
++  Wav1cEncoder *encoder;
++  AVFrame *frame;
++  Wav1cEosStatus eos_flag;
 +
-+    int base_q_idx;
++  int base_q_idx;
++  int b_frames;
++  int gop_size;
++  int64_t dts_counter;
 +} Wav1cContext;
 +
-+static av_cold int wav1c_init(AVCodecContext *avctx)
-+{
-+    Wav1cContext *ctx = avctx->priv_data;
-+    Wav1cConfig cfg;
-+    const uint8_t *hdr_data;
-+    size_t hdr_size;
++static av_cold int wav1c_init(AVCodecContext *avctx) {
++  Wav1cContext *ctx = avctx->priv_data;
++  Wav1cConfig cfg;
++  const uint8_t *hdr_data;
++  size_t hdr_size;
 +
-+    cfg.base_q_idx = ctx->base_q_idx;
-+    cfg.keyint = avctx->gop_size > 0 ? avctx->gop_size : 250;
-+    cfg.target_bitrate = avctx->bit_rate > 0 ? avctx->bit_rate : 0;
++  cfg.base_q_idx = ctx->base_q_idx;
++  cfg.keyint = avctx->gop_size > 0 ? avctx->gop_size : 250;
++  cfg.target_bitrate = avctx->bit_rate > 0 ? avctx->bit_rate : 0;
++  cfg.b_frames = ctx->b_frames;
++  cfg.gop_size = ctx->gop_size > 0 ? ctx->gop_size : 3;
 +
-+    if (avctx->framerate.num > 0 && avctx->framerate.den > 0)
-+        cfg.fps = (double)avctx->framerate.num / avctx->framerate.den;
-+    else if (avctx->time_base.num > 0 && avctx->time_base.den > 0)
-+        cfg.fps = (double)avctx->time_base.den / avctx->time_base.num;
-+    else
-+        cfg.fps = 25.0;
++  if (avctx->framerate.num > 0 && avctx->framerate.den > 0)
++    cfg.fps = (double)avctx->framerate.num / avctx->framerate.den;
++  else if (avctx->time_base.num > 0 && avctx->time_base.den > 0)
++    cfg.fps = (double)avctx->time_base.den / avctx->time_base.num;
++  else
++    cfg.fps = 25.0;
 +
-+    ctx->encoder = wav1c_encoder_new(avctx->width, avctx->height, &cfg);
-+    if (!ctx->encoder) {
-+        av_log(avctx, AV_LOG_ERROR, "Failed to create wav1c encoder\n");
-+        return AVERROR(EINVAL);
-+    }
++  ctx->encoder = wav1c_encoder_new(avctx->width, avctx->height, &cfg);
++  if (!ctx->encoder) {
++    av_log(avctx, AV_LOG_ERROR, "Failed to create wav1c encoder\n");
++    return AVERROR(EINVAL);
++  }
 +
-+    if (avctx->flags & AV_CODEC_FLAG_GLOBAL_HEADER) {
-+        hdr_size = wav1c_encoder_headers(ctx->encoder, &hdr_data);
-+        if (hdr_size > 0) {
-+            avctx->extradata = av_mallocz(hdr_size + AV_INPUT_BUFFER_PADDING_SIZE);
-+            if (!avctx->extradata) {
-+                av_log(avctx, AV_LOG_ERROR, "Cannot allocate extradata\n");
-+                return AVERROR(ENOMEM);
-+            }
-+            memcpy(avctx->extradata, hdr_data, hdr_size);
-+            avctx->extradata_size = hdr_size;
-+        }
-+    }
-+
-+    ctx->frame = av_frame_alloc();
-+    if (!ctx->frame)
++  if (avctx->flags & AV_CODEC_FLAG_GLOBAL_HEADER) {
++    hdr_size = wav1c_encoder_headers(ctx->encoder, &hdr_data);
++    if (hdr_size > 0) {
++      avctx->extradata = av_mallocz(hdr_size + AV_INPUT_BUFFER_PADDING_SIZE);
++      if (!avctx->extradata) {
++        av_log(avctx, AV_LOG_ERROR, "Cannot allocate extradata\n");
 +        return AVERROR(ENOMEM);
++      }
++      memcpy(avctx->extradata, hdr_data, hdr_size);
++      avctx->extradata_size = hdr_size;
++    }
++  }
 +
-+    ctx->eos_flag = WAV1C_EOS_NOT_REACHED;
++  ctx->frame = av_frame_alloc();
++  if (!ctx->frame)
++    return AVERROR(ENOMEM);
 +
-+    return 0;
++  ctx->eos_flag = WAV1C_EOS_NOT_REACHED;
++  ctx->dts_counter = 0;
++
++  return 0;
 +}
 +
-+static int wav1c_send_frame(AVCodecContext *avctx, const AVFrame *frame)
-+{
-+    Wav1cContext *ctx = avctx->priv_data;
-+    int ret;
-+    size_t y_size, uv_size;
++static int wav1c_send_frame(AVCodecContext *avctx, const AVFrame *frame) {
++  Wav1cContext *ctx = avctx->priv_data;
++  int ret;
++  size_t y_size, uv_size;
 +
-+    if (!frame) {
-+        if (ctx->eos_flag == WAV1C_EOS_SENT)
-+            return 0;
-+        wav1c_encoder_flush(ctx->encoder);
-+        ctx->eos_flag = WAV1C_EOS_SENT;
-+        return 0;
-+    }
-+
-+    y_size = (size_t)frame->linesize[0] * avctx->height;
-+    uv_size = (size_t)frame->linesize[1] * ((avctx->height + 1) / 2);
-+
-+    ret = wav1c_encoder_send_frame(ctx->encoder,
-+                                   frame->data[0], y_size,
-+                                   frame->data[1], uv_size,
-+                                   frame->data[2], uv_size,
-+                                   frame->linesize[0],
-+                                   frame->linesize[1]);
-+    if (ret < 0) {
-+        av_log(avctx, AV_LOG_ERROR, "Error sending frame to wav1c encoder\n");
-+        return AVERROR_EXTERNAL;
-+    }
-+
++  if (!frame) {
++    if (ctx->eos_flag == WAV1C_EOS_SENT)
++      return 0;
++    wav1c_encoder_flush(ctx->encoder);
++    ctx->eos_flag = WAV1C_EOS_SENT;
 +    return 0;
++  }
++
++  y_size = (size_t)frame->linesize[0] * avctx->height;
++  uv_size = (size_t)frame->linesize[1] * ((avctx->height + 1) / 2);
++
++  ret = wav1c_encoder_send_frame(
++      ctx->encoder, frame->data[0], y_size, frame->data[1], uv_size,
++      frame->data[2], uv_size, frame->linesize[0], frame->linesize[1]);
++  if (ret < 0) {
++    av_log(avctx, AV_LOG_ERROR, "Error sending frame to wav1c encoder\n");
++    return AVERROR_EXTERNAL;
++  }
++
++  return 0;
 +}
 +
-+static int wav1c_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
-+{
-+    Wav1cContext *ctx = avctx->priv_data;
-+    AVFrame *frame = ctx->frame;
-+    Wav1cPacket *wav1c_pkt;
-+    int ret;
++static int wav1c_receive_packet(AVCodecContext *avctx, AVPacket *pkt) {
++  Wav1cContext *ctx = avctx->priv_data;
++  AVFrame *frame = ctx->frame;
++  Wav1cPacket *wav1c_pkt;
++  int ret;
 +
-+    if (ctx->eos_flag == WAV1C_EOS_RECEIVED)
-+        return AVERROR_EOF;
++  if (ctx->eos_flag == WAV1C_EOS_RECEIVED)
++    return AVERROR_EOF;
 +
-+    ret = ff_encode_get_frame(avctx, frame);
-+    if (ret < 0 && ret != AVERROR_EOF)
-+        return ret;
-+    if (ret == AVERROR_EOF)
-+        frame = NULL;
++  ret = ff_encode_get_frame(avctx, frame);
++  if (ret < 0 && ret != AVERROR_EOF)
++    return ret;
++  if (ret == AVERROR_EOF)
++    frame = NULL;
 +
-+    ret = wav1c_send_frame(avctx, frame);
-+    if (ret < 0)
-+        return ret;
-+    av_frame_unref(ctx->frame);
++  ret = wav1c_send_frame(avctx, frame);
++  if (ret < 0)
++    return ret;
++  av_frame_unref(ctx->frame);
 +
-+    wav1c_pkt = wav1c_encoder_receive_packet(ctx->encoder);
-+    if (!wav1c_pkt) {
-+        if (ctx->eos_flag == WAV1C_EOS_SENT) {
-+            ctx->eos_flag = WAV1C_EOS_RECEIVED;
-+            return AVERROR_EOF;
-+        }
-+        return AVERROR(EAGAIN);
++  wav1c_pkt = wav1c_encoder_receive_packet(ctx->encoder);
++  if (!wav1c_pkt) {
++    if (ctx->eos_flag == WAV1C_EOS_SENT) {
++      ctx->eos_flag = WAV1C_EOS_RECEIVED;
++      return AVERROR_EOF;
 +    }
++    return AVERROR(EAGAIN);
++  }
 +
-+    ret = av_new_packet(pkt, wav1c_pkt->size);
-+    if (ret < 0) {
-+        wav1c_packet_free(wav1c_pkt);
-+        return ret;
-+    }
-+
-+    memcpy(pkt->data, wav1c_pkt->data, wav1c_pkt->size);
-+    pkt->pts = wav1c_pkt->frame_number;
-+    pkt->dts = wav1c_pkt->frame_number;
-+
-+    if (wav1c_pkt->is_keyframe)
-+        pkt->flags |= AV_PKT_FLAG_KEY;
-+
++  ret = av_new_packet(pkt, wav1c_pkt->size);
++  if (ret < 0) {
 +    wav1c_packet_free(wav1c_pkt);
++    return ret;
++  }
 +
-+    return 0;
++  memcpy(pkt->data, wav1c_pkt->data, wav1c_pkt->size);
++  pkt->pts = ctx->dts_counter;
++  pkt->dts = ctx->dts_counter;
++  ctx->dts_counter++;
++
++  if (wav1c_pkt->is_keyframe)
++    pkt->flags |= AV_PKT_FLAG_KEY;
++
++  wav1c_packet_free(wav1c_pkt);
++
++  return 0;
 +}
 +
-+static av_cold int wav1c_close(AVCodecContext *avctx)
-+{
-+    Wav1cContext *ctx = avctx->priv_data;
++static av_cold int wav1c_close(AVCodecContext *avctx) {
++  Wav1cContext *ctx = avctx->priv_data;
 +
-+    if (ctx->encoder) {
-+        wav1c_encoder_free(ctx->encoder);
-+        ctx->encoder = NULL;
-+    }
++  if (ctx->encoder) {
++    wav1c_encoder_free(ctx->encoder);
++    ctx->encoder = NULL;
++  }
 +
-+    av_frame_free(&ctx->frame);
++  av_frame_free(&ctx->frame);
 +
-+    return 0;
++  return 0;
 +}
 +
 +#define OFFSET(x) offsetof(Wav1cContext, x)
 +#define VE AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_ENCODING_PARAM
 +
 +static const AVOption wav1c_options[] = {
-+    { "wav1c-q", "Quantizer (0-255, lower is higher quality)",
-+      OFFSET(base_q_idx), AV_OPT_TYPE_INT, { .i64 = 128 }, 0, 255, VE },
-+    { NULL },
++    {"wav1c-q",
++     "Quantizer (0-255, lower is higher quality)",
++     OFFSET(base_q_idx),
++     AV_OPT_TYPE_INT,
++     {.i64 = 128},
++     0,
++     255,
++     VE},
++    {"wav1c-b-frames",
++     "Enable B-frame encoding (experimental)",
++     OFFSET(b_frames),
++     AV_OPT_TYPE_BOOL,
++     {.i64 = 0},
++     0,
++     1,
++     VE},
++    {"wav1c-gop-size",
++     "Mini-GOP size for B-frame batching",
++     OFFSET(gop_size),
++     AV_OPT_TYPE_INT,
++     {.i64 = 3},
++     2,
++     16,
++     VE},
++    {NULL},
 +};
 +
 +static const AVClass wav1c_class = {
 +    .class_name = "libwav1c",
-+    .item_name  = av_default_item_name,
-+    .option     = wav1c_options,
-+    .version    = LIBAVUTIL_VERSION_INT,
++    .item_name = av_default_item_name,
++    .option = wav1c_options,
++    .version = LIBAVUTIL_VERSION_INT,
 +};
 +
 +static const FFCodecDefault wav1c_defaults[] = {
-+    { "b", "0" },
-+    { "g", "250" },
-+    { NULL },
++    {"b", "0"},
++    {"g", "250"},
++    {NULL},
 +};
 +
 +const FFCodec ff_libwav1c_encoder = {
-+    .p.name         = "libwav1c",
++    .p.name = "libwav1c",
 +    CODEC_LONG_NAME("wav1c AV1 encoder"),
 +    .priv_data_size = sizeof(Wav1cContext),
-+    .p.type         = AVMEDIA_TYPE_VIDEO,
-+    .p.id           = AV_CODEC_ID_AV1,
-+    .init           = wav1c_init,
++    .p.type = AVMEDIA_TYPE_VIDEO,
++    .p.id = AV_CODEC_ID_AV1,
++    .init = wav1c_init,
 +    FF_CODEC_RECEIVE_PACKET_CB(wav1c_receive_packet),
-+    .close          = wav1c_close,
++    .close = wav1c_close,
 +    .p.capabilities = AV_CODEC_CAP_DELAY,
-+    .caps_internal  = FF_CODEC_CAP_NOT_INIT_THREADSAFE |
-+                      FF_CODEC_CAP_INIT_CLEANUP,
++    .caps_internal =
++        FF_CODEC_CAP_NOT_INIT_THREADSAFE | FF_CODEC_CAP_INIT_CLEANUP,
 +    CODEC_PIXFMTS(AV_PIX_FMT_YUV420P),
-+    .color_ranges   = AVCOL_RANGE_MPEG,
-+    .p.priv_class   = &wav1c_class,
-+    .defaults       = wav1c_defaults,
++    .color_ranges = AVCOL_RANGE_MPEG,
++    .p.priv_class = &wav1c_class,
++    .defaults = wav1c_defaults,
 +    .p.wrapper_name = "libwav1c",
 +};
