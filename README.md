@@ -112,30 +112,65 @@ Notes:
 
 ## Rust API
 
-### Backward-compatible convenience APIs (8-bit)
+### Simple 8-bit SDR frame (solid color)
 
-The existing helpers are still available:
-- `encode_av1_ivf(...)`
-- `encode_av1_ivf_y4m(...)`
-- `encode_av1_ivf_multi(...)`
-- `FramePixels::solid(...)`
+```rust
+use wav1c::y4m::FramePixels;
+use wav1c::{encode_packets, EncodeConfig};
 
-### Streaming API with 10-bit/HDR config
+let frame = FramePixels::solid(320, 240, 128, 128, 128);
+let packets = encode_packets(&[frame], &EncodeConfig::default());
+
+assert!(!packets.is_empty());
+assert!(!packets[0].data.is_empty());
+```
+
+### Simple Y4M file encode (8-bit or 10-bit input)
+
+```rust
+use std::path::Path;
+use wav1c::y4m::FramePixels;
+use wav1c::{encode_packets, EncodeConfig};
+
+let frames = FramePixels::all_from_y4m_file(Path::new("input.y4m"))?;
+let config = EncodeConfig {
+    base_q_idx: 110,
+    keyint: 60,
+    fps: 30.0,
+    b_frames: true,
+    gop_size: 4,
+    ..EncodeConfig::default()
+};
+
+let packets = encode_packets(&frames, &config);
+assert!(!packets.is_empty());
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+### 10-bit HDR encode (signal + metadata)
 
 ```rust
 use wav1c::y4m::FramePixels;
 use wav1c::{
-    BitDepth, ColorRange, ContentLightLevel, Encoder, EncoderConfig,
+    encode_packets, BitDepth, ColorRange, ContentLightLevel, EncodeConfig,
     MasteringDisplayMetadata, VideoSignal,
 };
 
-let config = EncoderConfig {
-    base_q_idx: 128,
-    keyint: 25,
-    target_bitrate: None,
-    fps: 25.0,
-    b_frames: false,
-    gop_size: 3,
+let frame = FramePixels::solid_with_bit_depth(
+    1920,
+    1080,
+    512,
+    512,
+    512,
+    BitDepth::Ten,
+    ColorRange::Full,
+);
+
+let config = EncodeConfig {
+    keyint: 60,
+    fps: 30.0,
+    b_frames: true,
+    gop_size: 4,
     video_signal: VideoSignal::hdr10(ColorRange::Full),
     content_light: Some(ContentLightLevel {
         max_content_light_level: 203,
@@ -147,25 +182,11 @@ let config = EncoderConfig {
         max_luminance: 10_000_000,
         min_luminance: 1,
     }),
+    ..EncodeConfig::default()
 };
 
-let mut enc = Encoder::new(1920, 1080, config)?;
-let frame = FramePixels::solid_with_bit_depth(
-    1920,
-    1080,
-    512,
-    512,
-    512,
-    BitDepth::Ten,
-    ColorRange::Full,
-);
-
-enc.send_frame(&frame)?;
-enc.flush();
-while let Some(pkt) = enc.receive_packet() {
-    // pkt.data contains AV1 OBUs
-}
-# Ok::<(), Box<dyn std::error::Error>>(())
+let packets = encode_packets(&[frame], &config);
+assert!(!packets.is_empty());
 ```
 
 ### Key signal and metadata types
@@ -197,12 +218,75 @@ Canonical API:
 - `has_cll`, `max_cll`, `max_fall`
 - `has_mdcv`, primaries/white-point/luminance fields
 
-10-bit C usage example:
+Simple 8-bit SDR usage:
 
 ```c
+#include <stdio.h>
 #include "wav1c.h"
 
 Wav1cConfig cfg = wav1c_default_config();
+cfg.base_q_idx = 128;
+cfg.keyint = 60;
+cfg.fps = 30.0;
+cfg.b_frames = 1;
+cfg.gop_size = 4;
+
+Wav1cEncoder *enc = wav1c_encoder_new(320, 240, &cfg);
+if (!enc) {
+    fprintf(stderr, "encoder_new failed: %s\n", wav1c_last_error_message());
+    return -1;
+}
+
+// y/u/v are 4:2:0 8-bit planes. Lengths are sample counts, not byte counts.
+if (wav1c_encoder_send_frame(enc, y, y_len, u, u_len, v, v_len, 0, 0) != WAV1C_STATUS_OK) {
+    fprintf(stderr, "send_frame failed: %s\n", wav1c_last_error_message());
+    wav1c_encoder_free(enc);
+    return -1;
+}
+
+wav1c_encoder_flush(enc);
+for (Wav1cPacket *pkt = NULL; (pkt = wav1c_encoder_receive_packet(enc)) != NULL; ) {
+    // pkt->data / pkt->size contains AV1 OBU payload
+    wav1c_packet_free(pkt);
+}
+
+wav1c_encoder_free(enc);
+```
+
+Simple rate-control stats query:
+
+```c
+#include <stdio.h>
+#include "wav1c.h"
+
+Wav1cConfig cfg = wav1c_default_config();
+cfg.target_bitrate = 2 * 1000 * 1000; // 2 Mbps
+
+Wav1cEncoder *enc = wav1c_encoder_new(1280, 720, &cfg);
+if (!enc) return -1;
+
+Wav1cRateControlStats stats;
+if (wav1c_encoder_rate_control_stats(enc, &stats) == WAV1C_STATUS_OK) {
+    printf("target=%llu, avg_qp=%u, buffer=%u%%\n",
+           (unsigned long long)stats.target_bitrate,
+           stats.avg_qp,
+           stats.buffer_fullness_pct);
+}
+
+wav1c_encoder_free(enc);
+```
+
+10-bit HDR usage:
+
+```c
+#include <stdio.h>
+#include "wav1c.h"
+
+Wav1cConfig cfg = wav1c_default_config();
+cfg.keyint = 60;
+cfg.fps = 30.0;
+cfg.b_frames = 1;
+cfg.gop_size = 4;
 cfg.bit_depth = 10;
 cfg.color_range = 1; // full
 cfg.color_primaries = 9;
@@ -213,10 +297,20 @@ cfg.max_cll = 203;
 cfg.max_fall = 64;
 
 Wav1cEncoder *enc = wav1c_encoder_new(1920, 1080, &cfg);
-if (!enc) return -1;
+if (!enc) {
+    fprintf(stderr, "encoder_new failed: %s\n", wav1c_last_error_message());
+    return -1;
+}
 
 // y_len/u_len/v_len are sample counts, not byte counts.
-wav1c_encoder_send_frame_u16(enc, y, y_len, u, u_len, v, v_len, y_stride, uv_stride);
+if (wav1c_encoder_send_frame_u16(
+        enc, y, y_len, u, u_len, v, v_len, y_stride, uv_stride) != WAV1C_STATUS_OK) {
+    fprintf(stderr, "send_frame_u16 failed: %s\n", wav1c_last_error_message());
+    wav1c_encoder_free(enc);
+    return -1;
+}
+
+wav1c_encoder_flush(enc);
 Wav1cPacket *pkt = wav1c_encoder_receive_packet(enc);
 
 if (pkt) wav1c_packet_free(pkt);
