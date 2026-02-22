@@ -24,7 +24,7 @@ struct CliArgs {
     config: EncodeConfig,
     bit_depth_explicit: bool,
     color_range_explicit: bool,
-    #[cfg_attr(not(feature = "heic"), allow(dead_code))]
+    #[cfg(feature = "heic")]
     color_description_explicit: bool,
     hdr10_requested: bool,
 }
@@ -109,6 +109,7 @@ fn parse_cli() -> CliArgs {
     let mut cp: Option<u8> = None;
     let mut tc: Option<u8> = None;
     let mut mc: Option<u8> = None;
+    #[cfg(feature = "heic")]
     let mut color_description_explicit = false;
     let mut max_cll: Option<u16> = None;
     let mut max_fall: Option<u16> = None;
@@ -222,7 +223,10 @@ fn parse_cli() -> CliArgs {
                 transfer_characteristics,
                 matrix_coefficients,
             });
-            color_description_explicit = true;
+            #[cfg(feature = "heic")]
+            {
+                color_description_explicit = true;
+            }
         }
         (None, None, None) => {}
         _ => {
@@ -328,6 +332,7 @@ fn parse_cli() -> CliArgs {
         config,
         bit_depth_explicit,
         color_range_explicit,
+        #[cfg(feature = "heic")]
         color_description_explicit,
         hdr10_requested: hdr10,
     }
@@ -385,6 +390,7 @@ fn validate_bit_depth_constraints(
     Ok(())
 }
 
+#[cfg(feature = "heic")]
 fn should_use_auto_heic_gain_map(
     is_heic_input: bool,
     output_format: OutputFormat,
@@ -870,6 +876,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "heic")]
     fn heic_avif_auto_gain_map_path_trigger_conditions() {
         assert!(should_use_auto_heic_gain_map(
             true,

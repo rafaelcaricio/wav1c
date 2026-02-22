@@ -3,9 +3,9 @@ use std::io::{self, Write};
 use crate::mp4::{box_wrap, build_av1c, build_colr, full_box, strip_temporal_delimiters};
 use wav1c::{BitDepth, VideoSignal};
 
-#[cfg_attr(not(feature = "heic"), allow(dead_code))]
+#[cfg(feature = "heic")]
 const TMAP_GAIN_MAX_FLOOR: f64 = 2.5;
-#[cfg_attr(not(feature = "heic"), allow(dead_code))]
+#[cfg(feature = "heic")]
 const FRACTION_SCALE: u32 = 1_000_000;
 
 pub struct AvifConfig {
@@ -15,18 +15,21 @@ pub struct AvifConfig {
     pub video_signal: VideoSignal,
 }
 
+#[cfg(feature = "heic")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SignedFraction {
     pub n: i32,
     pub d: u32,
 }
 
+#[cfg(feature = "heic")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnsignedFraction {
     pub n: u32,
     pub d: u32,
 }
 
+#[cfg(feature = "heic")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToneMapMetadata {
     pub base_hdr_headroom: UnsignedFraction,
@@ -39,7 +42,7 @@ pub struct ToneMapMetadata {
     pub use_base_color_space: bool,
 }
 
-#[cfg_attr(not(feature = "heic"), allow(dead_code))]
+#[cfg(feature = "heic")]
 pub fn derive_tmap_metadata_from_apple(
     hdr_headroom_num: i32,
     hdr_headroom_den: i32,
@@ -81,7 +84,7 @@ pub fn derive_tmap_metadata_from_apple(
     })
 }
 
-#[cfg_attr(not(feature = "heic"), allow(dead_code))]
+#[cfg(feature = "heic")]
 fn normalize_positive_unsigned(num: i32, den: i32) -> Result<UnsignedFraction, String> {
     let mut n = i64::from(num);
     let mut d = i64::from(den);
@@ -104,7 +107,7 @@ fn normalize_positive_unsigned(num: i32, den: i32) -> Result<UnsignedFraction, S
     })
 }
 
-#[cfg_attr(not(feature = "heic"), allow(dead_code))]
+#[cfg(feature = "heic")]
 fn f64_to_signed_fraction(value: f64) -> Result<SignedFraction, String> {
     if !value.is_finite() {
         return Err("cannot convert non-finite value to fraction".to_owned());
@@ -119,6 +122,7 @@ fn f64_to_signed_fraction(value: f64) -> Result<SignedFraction, String> {
     })
 }
 
+#[cfg(feature = "heic")]
 pub fn build_tmap_payload(metadata: &ToneMapMetadata) -> Result<Vec<u8>, String> {
     validate_tmap_metadata(metadata)?;
 
@@ -153,14 +157,17 @@ pub fn build_tmap_payload(metadata: &ToneMapMetadata) -> Result<Vec<u8>, String>
     Ok(payload)
 }
 
+#[cfg(feature = "heic")]
 fn write_u32(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_be_bytes());
 }
 
+#[cfg(feature = "heic")]
 fn write_i32_twos_complement(out: &mut Vec<u8>, value: i32) {
     out.extend_from_slice(&(value as u32).to_be_bytes());
 }
 
+#[cfg(feature = "heic")]
 fn validate_tmap_metadata(metadata: &ToneMapMetadata) -> Result<(), String> {
     if metadata.base_hdr_headroom.d == 0 || metadata.alternate_hdr_headroom.d == 0 {
         return Err("tmap headroom denominators must be non-zero".to_owned());
@@ -186,6 +193,7 @@ fn validate_tmap_metadata(metadata: &ToneMapMetadata) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "heic")]
 fn has_identical_channels(metadata: &ToneMapMetadata) -> bool {
     metadata.gain_map_min[0] == metadata.gain_map_min[1]
         && metadata.gain_map_min[0] == metadata.gain_map_min[2]
@@ -240,6 +248,7 @@ pub fn write_avif<W: Write>(w: &mut W, config: &AvifConfig, obu_data: &[u8]) -> 
     Ok(())
 }
 
+#[cfg(feature = "heic")]
 pub fn write_avif_with_tmap_gain_map<W: Write>(
     w: &mut W,
     base_config: &AvifConfig,
@@ -337,6 +346,7 @@ fn build_ftyp() -> Vec<u8> {
     box_wrap(b"ftyp", &p)
 }
 
+#[cfg(feature = "heic")]
 fn build_ftyp_tmap() -> Vec<u8> {
     let mut p = Vec::new();
     p.extend_from_slice(b"avif");
@@ -411,6 +421,7 @@ fn build_iinf_single() -> Vec<u8> {
     build_iinf(&entries)
 }
 
+#[cfg(feature = "heic")]
 fn build_iinf_tmap() -> Vec<u8> {
     let entries = [
         InfeEntry {
@@ -444,6 +455,7 @@ fn build_iinf(entries: &[InfeEntry<'_>]) -> Vec<u8> {
     full_box(b"iinf", 0, 0, &p)
 }
 
+#[cfg(feature = "heic")]
 fn build_iref_tmap() -> Vec<u8> {
     let mut dimg_payload = Vec::new();
     dimg_payload.extend_from_slice(&2u16.to_be_bytes()); // from_item_id (tmap)
@@ -454,6 +466,7 @@ fn build_iref_tmap() -> Vec<u8> {
     full_box(b"iref", 0, 0, &dimg)
 }
 
+#[cfg(feature = "heic")]
 fn build_grpl_altr_tmap() -> Vec<u8> {
     let mut altr_payload = Vec::new();
     altr_payload.extend_from_slice(&1u32.to_be_bytes()); // group_id
@@ -485,6 +498,7 @@ fn build_iprp_single(config: &AvifConfig) -> Vec<u8> {
     box_wrap(b"iprp", &p)
 }
 
+#[cfg(feature = "heic")]
 fn build_iprp_tmap(base: &AvifConfig, gain: &AvifConfig) -> Vec<u8> {
     let mut ipco_payload = Vec::new();
     ipco_payload.extend_from_slice(&build_av1c(base.video_signal.bit_depth, &base.config_obus)); // 1
@@ -533,6 +547,7 @@ fn build_ipma_single() -> Vec<u8> {
     full_box(b"ipma", 0, 0, &p)
 }
 
+#[cfg(feature = "heic")]
 fn build_ipma_tmap() -> Vec<u8> {
     let mut p = Vec::new();
     p.extend_from_slice(&3u32.to_be_bytes()); // entry_count
@@ -560,7 +575,7 @@ fn build_ipma_tmap() -> Vec<u8> {
     full_box(b"ipma", 0, 0, &p)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "heic"))]
 mod tests {
     use super::*;
     use wav1c::{ColorDescription, ColorRange, VideoSignal};
