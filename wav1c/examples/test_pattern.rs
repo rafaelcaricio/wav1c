@@ -9,12 +9,12 @@ fn find_dav1d() -> Option<std::path::PathBuf> {
         }
     }
 
-    if let Ok(output) = std::process::Command::new("which").arg("dav1d").output() {
-        if output.status.success() {
-            let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !p.is_empty() {
-                return Some(std::path::PathBuf::from(p));
-            }
+    if let Ok(output) = std::process::Command::new("which").arg("dav1d").output()
+        && output.status.success()
+    {
+        let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !p.is_empty() {
+            return Some(std::path::PathBuf::from(p));
         }
     }
 
@@ -88,12 +88,12 @@ fn main() {
     };
 
     test_pattern(&dav1d, "only_u_gradient", 320, 240, |col, _row| {
-        let u = ((col * 256 / 320) as u8).min(255);
+        let u = (col * 256 / 320) as u8;
         (128, u, 128)
     });
 
     test_pattern(&dav1d, "v_col_gradient", 320, 240, |col, _row| {
-        let v = ((col * 256 / 320) as u8).min(255);
+        let v = (col * 256 / 320) as u8;
         (128, 128, v)
     });
 
@@ -105,15 +105,15 @@ fn main() {
     });
 
     test_pattern(&dav1d, "varying_chroma", 320, 240, |col, row| {
-        let y = ((row * 256 / 240) as u8).min(255);
-        let u = ((col * 256 / 320) as u8).min(255);
+        let y = (row * 256 / 240) as u8;
+        let u = (col * 256 / 320) as u8;
         (y, u, 128)
     });
 
     test_pattern(&dav1d, "all_varying", 320, 240, |col, row| {
-        let y = ((row * 256 / 240) as u8).min(255);
-        let u = ((col * 256 / 320) as u8).min(255);
-        let v = (((row + col) * 128 / 320) as u8).min(255);
+        let y = (row * 256 / 240) as u8;
+        let u = (col * 256 / 320) as u8;
+        let v = ((row + col) * 128 / 320) as u8;
         (y, u, v)
     });
 
@@ -121,8 +121,8 @@ fn main() {
         let y = ((row % 256) as u8)
             .wrapping_add((col % 64) as u8)
             .wrapping_mul(3);
-        let u = ((col * 256 / 640) as u8).min(255);
-        let v = ((row * 256 / 480) as u8).min(255);
+        let u = (col * 256 / 640) as u8;
+        let v = (row * 256 / 480) as u8;
         (y, u, v)
     });
 }
