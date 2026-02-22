@@ -256,6 +256,59 @@ impl FramePixels {
             color_range,
         }
     }
+
+    pub fn grid(
+        width: u32,
+        height: u32,
+        cell_size: u32,
+        bright: [u16; 3],
+        dark: [u16; 3],
+        bit_depth: BitDepth,
+        color_range: ColorRange,
+    ) -> Self {
+        let y_size = (width * height) as usize;
+        let uv_w = width.div_ceil(2) as usize;
+        let uv_h = height.div_ceil(2) as usize;
+        let uv_size = uv_w * uv_h;
+
+        let mut y_plane = vec![0u16; y_size];
+        let mut u_plane = vec![0u16; uv_size];
+        let mut v_plane = vec![0u16; uv_size];
+
+        for py in 0..height {
+            for px in 0..width {
+                let cell_x = px / cell_size;
+                let cell_y = py / cell_size;
+                let is_bright = (cell_x + cell_y) % 2 == 0;
+                let yuv = if is_bright { bright } else { dark };
+                y_plane[(py * width + px) as usize] = yuv[0];
+            }
+        }
+
+        for cy in 0..uv_h as u32 {
+            for cx in 0..uv_w as u32 {
+                let px = cx * 2;
+                let py = cy * 2;
+                let cell_x = px / cell_size;
+                let cell_y = py / cell_size;
+                let is_bright = (cell_x + cell_y) % 2 == 0;
+                let yuv = if is_bright { bright } else { dark };
+                let idx = (cy * uv_w as u32 + cx) as usize;
+                u_plane[idx] = yuv[1];
+                v_plane[idx] = yuv[2];
+            }
+        }
+
+        Self {
+            y: y_plane,
+            u: u_plane,
+            v: v_plane,
+            width,
+            height,
+            bit_depth,
+            color_range,
+        }
+    }
 }
 
 #[cfg(test)]

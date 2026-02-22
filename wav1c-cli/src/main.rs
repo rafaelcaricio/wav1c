@@ -28,6 +28,10 @@ enum InputMode {
         u: u16,
         v: u16,
     },
+    Grid {
+        width: u32,
+        height: u32,
+    },
 }
 
 fn parse_bitrate(s: &str) -> Result<u64, String> {
@@ -96,6 +100,7 @@ fn parse_cli() -> CliArgs {
     let mut max_cll: Option<u16> = None;
     let mut max_fall: Option<u16> = None;
     let mut mdcv: Option<MasteringDisplayMetadata> = None;
+    let mut pattern: Option<String> = None;
 
     let mut args = env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
@@ -183,6 +188,9 @@ fn parse_cli() -> CliArgs {
                     process::exit(1);
                 }));
             }
+            "--pattern" => {
+                pattern = Some(args.next().unwrap_or_default());
+            }
             _ => positional.push(arg),
         }
     }
@@ -237,6 +245,24 @@ fn parse_cli() -> CliArgs {
 
     let input = if positional.len() == 1 && positional[0].ends_with(".y4m") {
         InputMode::Y4m(positional[0].clone())
+    } else if positional.len() == 2 && pattern.is_some() {
+        let width = positional[0].parse::<u32>().unwrap_or_else(|_| {
+            eprintln!("Error: width must be a positive integer");
+            process::exit(1);
+        });
+        let height = positional[1].parse::<u32>().unwrap_or_else(|_| {
+            eprintln!("Error: height must be a positive integer");
+            process::exit(1);
+        });
+        match pattern.as_deref() {
+            Some("grid") => InputMode::Grid { width, height },
+            Some(p) => {
+                eprintln!("Error: unknown pattern: {p}");
+                eprintln!("Available patterns: grid");
+                process::exit(1);
+            }
+            None => unreachable!(),
+        }
     } else if positional.len() == 5 {
         let width = positional[0].parse::<u32>().unwrap_or_else(|_| {
             eprintln!("Error: width must be a positive integer");
@@ -280,8 +306,9 @@ fn parse_cli() -> CliArgs {
 }
 
 fn print_usage() {
-    eprintln!("Usage: wav1c <input.y4m> -o <output.ivf> [options]");
-    eprintln!("       wav1c <width> <height> <Y> <U> <V> -o <output.ivf> [options]");
+    eprintln!("Usage: wav1c <input.y4m> -o <output.ivf|mp4> [options]");
+    eprintln!("       wav1c <width> <height> <Y> <U> <V> -o <output.ivf|mp4> [options]");
+    eprintln!("       wav1c <width> <height> --pattern <name> -o <output.ivf|mp4> [options]");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  -q <0-255>              Quantizer index (default=128)");
@@ -296,10 +323,29 @@ fn print_usage() {
     eprintln!("  --max-cll <u16>         Content light level metadata");
     eprintln!("  --max-fall <u16>        Content light level metadata");
     eprintln!("  --mdcv <rx,ry,gx,gy,bx,by,wx,wy,max_lum,min_lum>");
+    eprintln!("  --pattern <name>        Test pattern (grid)");
+}
+
+enum OutputFormat {
+    Ivf,
+    Mp4,
+}
+
+fn detect_format(path: &str) -> OutputFormat {
+    match Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("mp4") | Some("m4v") => OutputFormat::Mp4,
+        _ => OutputFormat::Ivf,
+    }
 }
 
 fn main() {
     let mut cli = parse_cli();
+    let format = detect_format(&cli.output_path);
 
     let frames = match &cli.input {
         InputMode::Y4m(path) => wav1c::y4m::FramePixels::all_from_y4m_file(Path::new(path))
@@ -333,6 +379,26 @@ fn main() {
                 cli.config.video_signal.color_range,
             )]
         }
+        InputMode::Grid { width, height } => {
+            let bd = cli.config.video_signal.bit_depth;
+            let cr = cli.config.video_signal.color_range;
+            let neutral_chroma = if bd == BitDepth::Ten { 512 } else { 128 };
+            let (bright_y, dark_y) = match (bd, cr) {
+                (BitDepth::Ten, ColorRange::Limited) => (940, 504),
+                (BitDepth::Ten, ColorRange::Full) => (1023, 520),
+                (BitDepth::Eight, ColorRange::Limited) => (235, 130),
+                (BitDepth::Eight, ColorRange::Full) => (255, 134),
+            };
+            vec![wav1c::y4m::FramePixels::grid(
+                *width,
+                *height,
+                64,
+                [bright_y, neutral_chroma, neutral_chroma],
+                [dark_y, neutral_chroma, neutral_chroma],
+                bd,
+                cr,
+            )]
+        }
     };
 
     if frames.is_empty() {
@@ -357,14 +423,7 @@ fn main() {
         process::exit(1);
     });
 
-    let mut output = Vec::new();
-    wav1c::ivf::write_ivf_header(
-        &mut output,
-        width as u16,
-        height as u16,
-        frames.len() as u32,
-    )
-    .unwrap();
+    let mut packets: Vec<wav1c::Packet> = Vec::new();
 
     for frame in &frames {
         encoder.send_frame(frame).unwrap_or_else(|e| {
@@ -372,19 +431,16 @@ fn main() {
             process::exit(1);
         });
 
-        if let Some(packet) = encoder.receive_packet() {
+        while let Some(packet) = encoder.receive_packet() {
             let frame_type_str = match packet.frame_type {
                 wav1c::FrameType::Key => "KEY",
                 wav1c::FrameType::Inter => "INTER",
             };
             eprintln!(
                 "frame {:>4}  {:>5}  {} bytes",
-                packet.frame_number,
-                frame_type_str,
-                packet.data.len()
+                packet.frame_number, frame_type_str, packet.data.len()
             );
-
-            wav1c::ivf::write_ivf_frame(&mut output, packet.frame_number, &packet.data).unwrap();
+            packets.push(packet);
         }
     }
 
@@ -397,27 +453,68 @@ fn main() {
         };
         eprintln!(
             "frame {:>4}  {:>5}  {} bytes",
-            packet.frame_number,
-            frame_type_str,
-            packet.data.len()
+            packet.frame_number, frame_type_str, packet.data.len()
         );
-        wav1c::ivf::write_ivf_frame(&mut output, packet.frame_number, &packet.data).unwrap();
+        packets.push(packet);
     }
 
     let mut file = File::create(&cli.output_path).unwrap_or_else(|e| {
         eprintln!("Error creating {}: {}", cli.output_path, e);
         process::exit(1);
     });
-    file.write_all(&output).unwrap_or_else(|e| {
-        eprintln!("Error writing {}: {}", cli.output_path, e);
-        process::exit(1);
-    });
+
+    let output_size = match format {
+        OutputFormat::Ivf => {
+            let mut output = Vec::new();
+            wav1c::ivf::write_ivf_header(
+                &mut output,
+                width as u16,
+                height as u16,
+                packets.len() as u32,
+            )
+            .unwrap();
+            for p in &packets {
+                wav1c::ivf::write_ivf_frame(&mut output, p.frame_number, &p.data).unwrap();
+            }
+            file.write_all(&output).unwrap_or_else(|e| {
+                eprintln!("Error writing {}: {}", cli.output_path, e);
+                process::exit(1);
+            });
+            output.len()
+        }
+        OutputFormat::Mp4 => {
+            let config_obus = encoder.headers();
+            let (fps_num, fps_den) = wav1c::mp4::fps_to_rational(cli.config.fps);
+            let samples: Vec<wav1c::mp4::Mp4Sample> = packets
+                .iter()
+                .map(|p| wav1c::mp4::Mp4Sample {
+                    data: wav1c::mp4::strip_temporal_delimiters(&p.data),
+                    is_sync: p.frame_type == wav1c::FrameType::Key,
+                })
+                .collect();
+            let mp4_config = wav1c::mp4::Mp4Config {
+                width,
+                height,
+                fps_num,
+                fps_den,
+                config_obus,
+                video_signal: cli.config.video_signal,
+            };
+            let mut output = Vec::new();
+            wav1c::mp4::write_mp4(&mut output, &mp4_config, &samples).unwrap();
+            file.write_all(&output).unwrap_or_else(|e| {
+                eprintln!("Error writing {}: {}", cli.output_path, e);
+                process::exit(1);
+            });
+            output.len()
+        }
+    };
 
     eprintln!();
     if let Some(stats) = encoder.rate_control_stats() {
         eprintln!(
             "Wrote {} bytes to {} ({} frames, target={}kbps, avg_qp={}, buffer={}%, keyint={})",
-            output.len(),
+            output_size,
             cli.output_path,
             frames.len(),
             stats.target_bitrate / 1000,
@@ -432,7 +529,7 @@ fn main() {
         );
         eprintln!(
             "Wrote {} bytes to {} ({} frames, q={}, keyint={}, bit_depth={}, dc_dq={}, ac_dq={})",
-            output.len(),
+            output_size,
             cli.output_path,
             frames.len(),
             cli.config.base_q_idx,

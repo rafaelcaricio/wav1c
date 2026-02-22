@@ -10,6 +10,7 @@ pub mod error;
 pub mod frame;
 pub mod ivf;
 pub mod metadata;
+pub mod mp4;
 pub mod msac;
 pub mod obu;
 pub mod packet;
