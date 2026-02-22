@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod avif;
 pub mod bitwriter;
 pub mod cdef;
 pub mod cdf;

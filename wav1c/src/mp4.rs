@@ -64,7 +64,7 @@ pub fn write_mp4<W: Write>(
     Ok(())
 }
 
-fn box_wrap(box_type: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+pub(crate) fn box_wrap(box_type: &[u8; 4], payload: &[u8]) -> Vec<u8> {
     let size = (8 + payload.len()) as u32;
     let mut out = Vec::with_capacity(size as usize);
     out.extend_from_slice(&size.to_be_bytes());
@@ -73,7 +73,7 @@ fn box_wrap(box_type: &[u8; 4], payload: &[u8]) -> Vec<u8> {
     out
 }
 
-fn full_box(box_type: &[u8; 4], version: u8, flags: u32, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn full_box(box_type: &[u8; 4], version: u8, flags: u32, payload: &[u8]) -> Vec<u8> {
     let mut inner = Vec::with_capacity(4 + payload.len());
     inner.push(version);
     inner.extend_from_slice(&flags.to_be_bytes()[1..4]);
@@ -292,31 +292,31 @@ fn build_av01(config: &Mp4Config) -> Vec<u8> {
     p.extend_from_slice(&0x0018u16.to_be_bytes());
     p.extend_from_slice(&0xFFFFu16.to_be_bytes());
 
-    p.extend_from_slice(&build_av1c(config));
-    p.extend_from_slice(&build_colr(config));
+    p.extend_from_slice(&build_av1c(config.video_signal.bit_depth, &config.config_obus));
+    p.extend_from_slice(&build_colr(&config.video_signal));
     p.extend_from_slice(&build_pasp());
 
     box_wrap(b"av01", &p)
 }
 
-fn build_av1c(config: &Mp4Config) -> Vec<u8> {
-    let high_bitdepth = config.video_signal.bit_depth == BitDepth::Ten;
+pub(crate) fn build_av1c(bit_depth: BitDepth, config_obus: &[u8]) -> Vec<u8> {
+    let high_bitdepth = bit_depth == BitDepth::Ten;
 
     let mut p = Vec::new();
     p.push(0x81);
     p.push(0x0D);
     p.push(if high_bitdepth { 0x4C } else { 0x0C });
     p.push(0x00);
-    p.extend_from_slice(&config.config_obus);
+    p.extend_from_slice(config_obus);
 
     box_wrap(b"av1C", &p)
 }
 
-fn build_colr(config: &Mp4Config) -> Vec<u8> {
+pub(crate) fn build_colr(video_signal: &VideoSignal) -> Vec<u8> {
     let mut p = Vec::new();
     p.extend_from_slice(b"nclx");
 
-    if let Some(cd) = config.video_signal.color_description {
+    if let Some(cd) = video_signal.color_description {
         p.extend_from_slice(&(cd.color_primaries as u16).to_be_bytes());
         p.extend_from_slice(&(cd.transfer_characteristics as u16).to_be_bytes());
         p.extend_from_slice(&(cd.matrix_coefficients as u16).to_be_bytes());
@@ -326,7 +326,7 @@ fn build_colr(config: &Mp4Config) -> Vec<u8> {
         p.extend_from_slice(&2u16.to_be_bytes());
     }
 
-    let full_range = match config.video_signal.color_range {
+    let full_range = match video_signal.color_range {
         ColorRange::Full => 0x80u8,
         ColorRange::Limited => 0x00u8,
     };

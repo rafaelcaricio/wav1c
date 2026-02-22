@@ -306,9 +306,9 @@ fn parse_cli() -> CliArgs {
 }
 
 fn print_usage() {
-    eprintln!("Usage: wav1c <input.y4m> -o <output.ivf|mp4> [options]");
-    eprintln!("       wav1c <width> <height> <Y> <U> <V> -o <output.ivf|mp4> [options]");
-    eprintln!("       wav1c <width> <height> --pattern <name> -o <output.ivf|mp4> [options]");
+    eprintln!("Usage: wav1c <input.y4m> -o <output.ivf|mp4|avif> [options]");
+    eprintln!("       wav1c <width> <height> <Y> <U> <V> -o <output.ivf|mp4|avif> [options]");
+    eprintln!("       wav1c <width> <height> --pattern <name> -o <output.ivf|mp4|avif> [options]");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  -q <0-255>              Quantizer index (default=128)");
@@ -329,6 +329,7 @@ fn print_usage() {
 enum OutputFormat {
     Ivf,
     Mp4,
+    Avif,
 }
 
 fn detect_format(path: &str) -> OutputFormat {
@@ -339,6 +340,7 @@ fn detect_format(path: &str) -> OutputFormat {
         .as_deref()
     {
         Some("mp4") | Some("m4v") => OutputFormat::Mp4,
+        Some("avif") => OutputFormat::Avif,
         _ => OutputFormat::Ivf,
     }
 }
@@ -502,6 +504,25 @@ fn main() {
             };
             let mut output = Vec::new();
             wav1c::mp4::write_mp4(&mut output, &mp4_config, &samples).unwrap();
+            file.write_all(&output).unwrap_or_else(|e| {
+                eprintln!("Error writing {}: {}", cli.output_path, e);
+                process::exit(1);
+            });
+            output.len()
+        }
+        OutputFormat::Avif => {
+            if packets.is_empty() {
+                eprintln!("Error: no frames to encode");
+                process::exit(1);
+            }
+            let avif_config = wav1c::avif::AvifConfig {
+                width,
+                height,
+                config_obus: encoder.headers(),
+                video_signal: cli.config.video_signal,
+            };
+            let mut output = Vec::new();
+            wav1c::avif::write_avif(&mut output, &avif_config, &packets[0].data).unwrap();
             file.write_all(&output).unwrap_or_else(|e| {
                 eprintln!("Error writing {}: {}", cli.output_path, e);
                 process::exit(1);
