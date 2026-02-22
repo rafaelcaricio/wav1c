@@ -59,8 +59,8 @@ pub fn derive_tmap_metadata_from_apple(
     if !gain_value.is_finite() {
         return Err("Apple HDRGain value is not finite".to_owned());
     }
-    if gain_value <= 0.0 {
-        return Err("Apple HDRGain value must be > 0".to_owned());
+    if gain_value < 0.0 {
+        return Err("Apple HDRGain value must be >= 0".to_owned());
     }
 
     let alternate_headroom_f = hdr_headroom.n as f64 / hdr_headroom.d as f64;
@@ -600,6 +600,15 @@ mod tests {
         assert_eq!(metadata.gain_map_max[0], SignedFraction { n: 3_500_000, d: 1_000_000 });
         assert_eq!(metadata.gain_map_max[1], SignedFraction { n: 3_500_000, d: 1_000_000 });
         assert_eq!(metadata.gain_map_max[2], SignedFraction { n: 3_500_000, d: 1_000_000 });
+    }
+
+    #[test]
+    fn derive_tmap_accepts_zero_hdr_gain() {
+        let metadata = derive_tmap_metadata_from_apple(1, 2, 0, 1).expect("derive should succeed");
+        assert_eq!(metadata.alternate_hdr_headroom, UnsignedFraction { n: 1, d: 2 });
+        assert_eq!(metadata.gain_map_max[0], SignedFraction { n: 2_500_000, d: 1_000_000 });
+        assert_eq!(metadata.gain_map_max[1], SignedFraction { n: 2_500_000, d: 1_000_000 });
+        assert_eq!(metadata.gain_map_max[2], SignedFraction { n: 2_500_000, d: 1_000_000 });
     }
 
     #[test]
