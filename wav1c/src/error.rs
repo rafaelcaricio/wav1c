@@ -39,7 +39,7 @@ impl fmt::Display for EncoderError {
             EncoderError::InvalidDimensions { width, height } => {
                 write!(
                     f,
-                    "invalid dimensions {}x{}: width and height must both be > 0",
+                    "invalid dimensions {}x{}: width and height must be in 1..=65536 for AV1 sequence headers",
                     width, height
                 )
             }

@@ -10,6 +10,8 @@ use crate::sequence;
 use crate::video::{ContentLightLevel, MasteringDisplayMetadata, VideoSignal};
 use crate::y4m::FramePixels;
 
+const MAX_AV1_FRAME_DIMENSION: u32 = 1 << 16;
+
 #[derive(Debug, Clone)]
 pub struct EncoderConfig {
     pub base_q_idx: u8,
@@ -64,7 +66,11 @@ pub struct Encoder {
 
 impl Encoder {
     pub fn new(width: u32, height: u32, config: EncoderConfig) -> Result<Self, EncoderError> {
-        if width == 0 || height == 0 {
+        if width == 0
+            || height == 0
+            || width > MAX_AV1_FRAME_DIMENSION
+            || height > MAX_AV1_FRAME_DIMENSION
+        {
             return Err(EncoderError::InvalidDimensions { width, height });
         }
 
@@ -597,11 +603,59 @@ mod tests {
             content_light: None,
             mastering_display: None,
         };
-        let result = Encoder::new(u32::MAX, u32::MAX, config);
+        let result = Encoder::new(MAX_AV1_FRAME_DIMENSION, MAX_AV1_FRAME_DIMENSION, config);
         assert!(result.is_err());
         match result.unwrap_err() {
             EncoderError::AllocationPreflightFailed { .. } => {}
             other => panic!("expected AllocationPreflightFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_width_above_av1_sequence_header_limit_is_invalid() {
+        let config = EncoderConfig {
+            base_q_idx: 128,
+            keyint: 25,
+            target_bitrate: None,
+            fps: 25.0,
+            b_frames: false,
+            gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
+        };
+        let result = Encoder::new(MAX_AV1_FRAME_DIMENSION + 1, 64, config);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            EncoderError::InvalidDimensions { width, height } => {
+                assert_eq!(width, MAX_AV1_FRAME_DIMENSION + 1);
+                assert_eq!(height, 64);
+            }
+            other => panic!("expected InvalidDimensions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_height_above_av1_sequence_header_limit_is_invalid() {
+        let config = EncoderConfig {
+            base_q_idx: 128,
+            keyint: 25,
+            target_bitrate: None,
+            fps: 25.0,
+            b_frames: false,
+            gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
+        };
+        let result = Encoder::new(64, MAX_AV1_FRAME_DIMENSION + 1, config);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            EncoderError::InvalidDimensions { width, height } => {
+                assert_eq!(width, 64);
+                assert_eq!(height, MAX_AV1_FRAME_DIMENSION + 1);
+            }
+            other => panic!("expected InvalidDimensions, got {other:?}"),
         }
     }
 
