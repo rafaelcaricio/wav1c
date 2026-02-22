@@ -17,14 +17,11 @@ typedef struct {
     int32_t        is_keyframe;
 } Wav1cPacket;
 
-typedef struct {
-    uint8_t  base_q_idx;
-    size_t   keyint;
-    uint64_t target_bitrate;
-    double   fps;
-    int32_t  b_frames;
-    size_t   gop_size;
-} Wav1cConfig;
+enum {
+    WAV1C_STATUS_OK = 0,
+    WAV1C_STATUS_INVALID_ARGUMENT = -1,
+    WAV1C_STATUS_ENCODE_FAILED = -3
+};
 
 typedef struct {
     uint8_t  base_q_idx;
@@ -52,12 +49,19 @@ typedef struct {
     uint16_t white_y;
     uint32_t max_luminance;
     uint32_t min_luminance;
-} Wav1cConfigEx;
+} Wav1cConfig;
 
-Wav1cEncoder *wav1c_encoder_new(uint32_t width, uint32_t height,
-                                const Wav1cConfig *cfg);
-Wav1cEncoder *wav1c_encoder_new_ex(uint32_t width, uint32_t height,
-                                   const Wav1cConfigEx *cfg);
+typedef struct {
+    uint64_t target_bitrate;
+    uint64_t frames_encoded;
+    uint32_t buffer_fullness_pct;
+    uint8_t  avg_qp;
+} Wav1cRateControlStats;
+
+Wav1cConfig wav1c_default_config(void);
+const char *wav1c_last_error_message(void);
+
+Wav1cEncoder *wav1c_encoder_new(uint32_t width, uint32_t height, const Wav1cConfig *cfg);
 
 void wav1c_encoder_free(Wav1cEncoder *enc);
 
@@ -79,6 +83,7 @@ Wav1cPacket *wav1c_encoder_receive_packet(Wav1cEncoder *enc);
 void wav1c_packet_free(Wav1cPacket *pkt);
 
 void wav1c_encoder_flush(Wav1cEncoder *enc);
+int wav1c_encoder_rate_control_stats(const Wav1cEncoder *enc, Wav1cRateControlStats *out_stats);
 
 #ifdef __cplusplus
 }

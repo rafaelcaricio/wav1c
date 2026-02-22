@@ -182,15 +182,15 @@ Exported from the crate root:
 
 Header: `wav1c-ffi/include/wav1c.h`
 
-Legacy 8-bit API (unchanged):
+Canonical API:
+- `wav1c_default_config()`
 - `wav1c_encoder_new(...)`
-- `wav1c_encoder_send_frame(...)`
+- `wav1c_encoder_send_frame(...)` (8-bit planes)
+- `wav1c_encoder_send_frame_u16(...)` (10-bit planes)
+- `wav1c_encoder_rate_control_stats(...)`
+- `wav1c_last_error_message()`
 
-Extended 10-bit/HDR API:
-- `wav1c_encoder_new_ex(...)`
-- `wav1c_encoder_send_frame_u16(...)`
-
-`Wav1cConfigEx` fields:
+`Wav1cConfig` fields:
 - `bit_depth`: `8` or `10`
 - `color_range`: `0` limited, `1` full
 - `color_primaries`, `transfer_characteristics`, `matrix_coefficients`: set to `-1` to omit color description
@@ -202,10 +202,7 @@ Extended 10-bit/HDR API:
 ```c
 #include "wav1c.h"
 
-Wav1cConfigEx cfg = {0};
-cfg.base_q_idx = 128;
-cfg.keyint = 25;
-cfg.fps = 25.0;
+Wav1cConfig cfg = wav1c_default_config();
 cfg.bit_depth = 10;
 cfg.color_range = 1; // full
 cfg.color_primaries = 9;
@@ -215,7 +212,7 @@ cfg.has_cll = 1;
 cfg.max_cll = 203;
 cfg.max_fall = 64;
 
-Wav1cEncoder *enc = wav1c_encoder_new_ex(1920, 1080, &cfg);
+Wav1cEncoder *enc = wav1c_encoder_new(1920, 1080, &cfg);
 if (!enc) return -1;
 
 // y_len/u_len/v_len are sample counts, not byte counts.
@@ -234,10 +231,8 @@ Build artifacts:
 
 Main entry point: `WasmEncoder`
 
-Constructors:
-- `new(width, height, base_q_idx, keyint)` (compat mode)
-- `new_with_config(...)`
-- `new_ex(...)` (explicit bit depth/signal + optional CLL)
+Constructor:
+- `new(width, height, base_q_idx, keyint, b_frames, gop_size, fps, target_bitrate, bit_depth, color_range, cp, tc, mc, has_cll, max_cll, max_fall)`
 
 10-bit/HDR methods:
 - `encode_frame_10bit(y, u, v)`
@@ -245,6 +240,7 @@ Constructors:
 - `set_video_signal(bit_depth, color_range, cp, tc, mc)`
 - `set_content_light_level(max_cll, max_fall)`
 - `set_mastering_display_metadata(...)`
+- `rate_control_stats()`
 
 Important: signal and metadata mutators must be called before the first submitted frame.
 

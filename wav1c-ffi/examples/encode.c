@@ -75,11 +75,7 @@ int main(int argc, char **argv) {
     uint32_t num_frames = (uint32_t)atoi(argv[6]);
     const char *output_path = NULL;
 
-    Wav1cConfig cfg;
-    cfg.base_q_idx = 128;
-    cfg.keyint = 25;
-    cfg.target_bitrate = 0;
-    cfg.fps = 25.0;
+    Wav1cConfig cfg = wav1c_default_config();
 
     for (int i = 7; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
@@ -152,7 +148,7 @@ int main(int argc, char **argv) {
 
     for (uint32_t i = 0; i < num_frames; i++) {
         int ret = wav1c_encoder_send_frame(enc,
-            y_plane, y_size, u_plane, uv_size, v_plane, uv_size);
+            y_plane, y_size, u_plane, uv_size, v_plane, uv_size, 0, 0);
         if (ret != 0) {
             fprintf(stderr, "Error: send_frame failed at frame %u\n", i);
             break;

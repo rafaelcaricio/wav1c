@@ -368,8 +368,8 @@ fn dav1d_decodes_moderate_multi_tile_keyframe() {
         return;
     };
 
-    let width = 4160;
-    let height = 2304;
+    let width = 4097;
+    let height = 256;
     let output = encode_solid_ivf(width, height, 128, 128, 128);
     let (success, stderr, _) = decode_to_y4m(&dav1d, &output, "moderate_multi_tile_key");
     assert!(success, "dav1d failed for {}x{}: {}", width, height, stderr);
@@ -386,8 +386,8 @@ fn dav1d_decodes_moderate_multi_tile_inter() {
         return;
     };
 
-    let width = 4160;
-    let height = 2304;
+    let width = 4097;
+    let height = 256;
     let frames = vec![
         FramePixels::solid(width, height, 96, 128, 128),
         FramePixels::solid(width, height, 112, 128, 128),

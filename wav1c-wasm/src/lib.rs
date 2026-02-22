@@ -9,6 +9,37 @@ use wav1c::{
 };
 
 #[wasm_bindgen]
+pub struct WasmRateControlStats {
+    target_bitrate: u64,
+    frames_encoded: u64,
+    buffer_fullness_pct: u32,
+    avg_qp: u8,
+}
+
+#[wasm_bindgen]
+impl WasmRateControlStats {
+    #[wasm_bindgen(getter)]
+    pub fn target_bitrate(&self) -> u64 {
+        self.target_bitrate
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn frames_encoded(&self) -> u64 {
+        self.frames_encoded
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn buffer_fullness_pct(&self) -> u32 {
+        self.buffer_fullness_pct
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn avg_qp(&self) -> u8 {
+        self.avg_qp
+    }
+}
+
+#[wasm_bindgen]
 pub struct WasmEncoder {
     encoder: wav1c::Encoder,
     config: EncoderConfig,
@@ -22,113 +53,38 @@ pub struct WasmEncoder {
 
 #[wasm_bindgen]
 impl WasmEncoder {
-    /// Simple constructor — no B-frames, gop_size=1, fps=30. Kept for backwards compatibility.
+    /// Canonical constructor.
+    ///
+    /// - `target_bitrate`: bits/s (`0` disables rate control)
+    /// - `color_range`: `0` limited, `1` full
+    /// - `color_primaries/transfer/matrix`: set all three to `-1` to omit color description
+    /// - `has_cll`: when false, `max_cll/max_fall` must both be zero
     #[wasm_bindgen(constructor)]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         width: u32,
         height: u32,
         base_q_idx: u8,
         keyint: usize,
-    ) -> Result<WasmEncoder, JsError> {
-        let config = EncoderConfig {
-            base_q_idx,
-            keyint,
-            target_bitrate: None,
-            fps: 30.0,
-            b_frames: false,
-            gop_size: 1,
-            video_signal: VideoSignal::default(),
-            content_light: None,
-            mastering_display: None,
-        };
-        Self::create(width, height, config)
-    }
-
-    /// Full-featured constructor exposing all encoder parameters.
-    ///
-    /// - `b_frames`: enable B-frame encoding (requires `gop_size > 1`)
-    /// - `gop_size`: mini-GOP size (number of frames per group, e.g. 3 = P + 2×B)
-    /// - `fps`: frames per second (used for rate-control)
-    /// - `target_bitrate`: optional CBR target in bits/s (pass 0 to disable)
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_config(
-        width: u32,
-        height: u32,
-        base_q_idx: u8,
-        keyint: usize,
         b_frames: bool,
         gop_size: usize,
         fps: f64,
-        target_bitrate: u32,
-    ) -> Result<WasmEncoder, JsError> {
-        let config = EncoderConfig {
-            base_q_idx,
-            keyint,
-            target_bitrate: if target_bitrate == 0 {
-                None
-            } else {
-                Some(target_bitrate as u64)
-            },
-            fps,
-            b_frames,
-            gop_size,
-            video_signal: VideoSignal::default(),
-            content_light: None,
-            mastering_display: None,
-        };
-        Self::create(width, height, config)
-    }
-
-    /// Extended constructor with explicit signal + optional HDR metadata.
-    ///
-    /// `color_range`: 0 = limited, 1 = full
-    /// `color_primaries/transfer/matrix`: set all three to -1 to omit color description
-    /// `max_cll/max_fall`: set both to 0 to omit CLL metadata
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_ex(
-        width: u32,
-        height: u32,
-        base_q_idx: u8,
-        keyint: usize,
-        b_frames: bool,
-        gop_size: usize,
-        fps: f64,
-        target_bitrate: u32,
+        target_bitrate: u64,
         bit_depth: u8,
         color_range: u8,
         color_primaries: i16,
         transfer: i16,
         matrix: i16,
+        has_cll: bool,
         max_cll: u16,
         max_fall: u16,
     ) -> Result<WasmEncoder, JsError> {
-        let mut signal = VideoSignal {
+        let signal = VideoSignal {
             bit_depth: parse_bit_depth(bit_depth)?,
             color_range: parse_color_range(color_range)?,
-            color_description: None,
+            color_description: parse_color_description(color_primaries, transfer, matrix)?,
         };
-
-        if color_primaries >= 0 || transfer >= 0 || matrix >= 0 {
-            if color_primaries < 0 || transfer < 0 || matrix < 0 {
-                return Err(JsError::new(
-                    "color_primaries, transfer, and matrix must be all provided or all omitted",
-                ));
-            }
-            signal.color_description = Some(ColorDescription {
-                color_primaries: color_primaries as u8,
-                transfer_characteristics: transfer as u8,
-                matrix_coefficients: matrix as u8,
-            });
-        }
-
-        let content_light = if max_cll == 0 && max_fall == 0 {
-            None
-        } else {
-            Some(ContentLightLevel {
-                max_content_light_level: max_cll,
-                max_frame_average_light_level: max_fall,
-            })
-        };
+        let content_light = parse_content_light(has_cll, max_cll, max_fall)?;
 
         let config = EncoderConfig {
             base_q_idx,
@@ -136,7 +92,7 @@ impl WasmEncoder {
             target_bitrate: if target_bitrate == 0 {
                 None
             } else {
-                Some(target_bitrate as u64)
+                Some(target_bitrate)
             },
             fps,
             b_frames,
@@ -150,7 +106,7 @@ impl WasmEncoder {
 
     fn create(width: u32, height: u32, config: EncoderConfig) -> Result<WasmEncoder, JsError> {
         let encoder = wav1c::Encoder::new(width, height, config.clone())
-            .map_err(|e| JsError::new(&format!("{:?}", e)))?;
+            .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(WasmEncoder {
             encoder,
             config,
@@ -178,7 +134,7 @@ impl WasmEncoder {
         };
         self.encoder
             .send_frame(&frame)
-            .map_err(|e| JsError::new(&format!("{:?}", e)))?;
+            .map_err(|e| JsError::new(&e.to_string()))?;
         self.frames_submitted += 1;
         Ok(())
     }
@@ -198,7 +154,7 @@ impl WasmEncoder {
         };
         self.encoder
             .send_frame(&frame)
-            .map_err(|e| JsError::new(&format!("{:?}", e)))?;
+            .map_err(|e| JsError::new(&e.to_string()))?;
         self.frames_submitted += 1;
         Ok(())
     }
@@ -235,26 +191,11 @@ impl WasmEncoder {
         matrix: i16,
     ) -> Result<(), JsError> {
         self.ensure_not_started()?;
-        let mut signal = VideoSignal {
+        self.config.video_signal = VideoSignal {
             bit_depth: parse_bit_depth(bit_depth)?,
             color_range: parse_color_range(color_range)?,
-            color_description: None,
+            color_description: parse_color_description(color_primaries, transfer, matrix)?,
         };
-
-        if color_primaries >= 0 || transfer >= 0 || matrix >= 0 {
-            if color_primaries < 0 || transfer < 0 || matrix < 0 {
-                return Err(JsError::new(
-                    "color_primaries, transfer, and matrix must be all provided or all omitted",
-                ));
-            }
-            signal.color_description = Some(ColorDescription {
-                color_primaries: color_primaries as u8,
-                transfer_characteristics: transfer as u8,
-                matrix_coefficients: matrix as u8,
-            });
-        }
-
-        self.config.video_signal = signal;
         self.recreate_encoder()
     }
 
@@ -327,9 +268,20 @@ impl WasmEncoder {
         self.height
     }
 
+    pub fn rate_control_stats(&self) -> Option<WasmRateControlStats> {
+        self.encoder
+            .rate_control_stats()
+            .map(|stats| WasmRateControlStats {
+                target_bitrate: stats.target_bitrate,
+                frames_encoded: stats.frames_encoded,
+                buffer_fullness_pct: stats.buffer_fullness_pct,
+                avg_qp: stats.avg_qp,
+            })
+    }
+
     fn recreate_encoder(&mut self) -> Result<(), JsError> {
         self.encoder = wav1c::Encoder::new(self.width, self.height, self.config.clone())
-            .map_err(|e| JsError::new(&format!("{:?}", e)))?;
+            .map_err(|e| JsError::new(&e.to_string()))?;
         self.last_keyframe = false;
         self.last_frame_number = 0;
         self.last_packet_size = 0;
@@ -347,8 +299,12 @@ impl WasmEncoder {
     }
 
     fn validate_plane_lengths(&self, y: usize, u: usize, v: usize) -> Result<(), JsError> {
-        let expected_y = (self.width * self.height) as usize;
-        let expected_uv = self.width.div_ceil(2) as usize * self.height.div_ceil(2) as usize;
+        let expected_y = (self.width as usize)
+            .checked_mul(self.height as usize)
+            .ok_or_else(|| JsError::new("plane dimensions overflowed"))?;
+        let expected_uv = (self.width.div_ceil(2) as usize)
+            .checked_mul(self.height.div_ceil(2) as usize)
+            .ok_or_else(|| JsError::new("plane dimensions overflowed"))?;
         if y != expected_y || u != expected_uv || v != expected_uv {
             return Err(JsError::new(&format!(
                 "invalid plane lengths: expected y={}, u={}, v={}, got y={}, u={}, v={}",
@@ -369,4 +325,54 @@ fn parse_color_range(v: u8) -> Result<ColorRange, JsError> {
         1 => Ok(ColorRange::Full),
         _ => Err(JsError::new("color_range must be 0 (limited) or 1 (full)")),
     }
+}
+
+fn parse_code_point(name: &str, v: i16) -> Result<u8, JsError> {
+    if (0..=u8::MAX as i16).contains(&v) {
+        Ok(v as u8)
+    } else {
+        Err(JsError::new(&format!("{name} must be in 0..=255")))
+    }
+}
+
+fn parse_color_description(
+    color_primaries: i16,
+    transfer: i16,
+    matrix: i16,
+) -> Result<Option<ColorDescription>, JsError> {
+    let values = [color_primaries, transfer, matrix];
+    if values.iter().any(|&v| v < -1) {
+        return Err(JsError::new(
+            "color_primaries, transfer, and matrix must be -1 or in 0..=255",
+        ));
+    }
+    let provided = values.iter().filter(|&&v| v >= 0).count();
+    match provided {
+        0 => Ok(None),
+        3 => Ok(Some(ColorDescription {
+            color_primaries: parse_code_point("color_primaries", color_primaries)?,
+            transfer_characteristics: parse_code_point("transfer", transfer)?,
+            matrix_coefficients: parse_code_point("matrix", matrix)?,
+        })),
+        _ => Err(JsError::new(
+            "color_primaries, transfer, and matrix must be all provided or all omitted",
+        )),
+    }
+}
+
+fn parse_content_light(
+    has_cll: bool,
+    max_cll: u16,
+    max_fall: u16,
+) -> Result<Option<ContentLightLevel>, JsError> {
+    if !has_cll {
+        if max_cll != 0 || max_fall != 0 {
+            return Err(JsError::new("max_cll/max_fall require has_cll=true"));
+        }
+        return Ok(None);
+    }
+    Ok(Some(ContentLightLevel {
+        max_content_light_level: max_cll,
+        max_frame_average_light_level: max_fall,
+    }))
 }
