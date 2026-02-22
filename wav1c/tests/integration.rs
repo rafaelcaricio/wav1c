@@ -40,7 +40,10 @@ fn encode_solid_ivf(width: u32, height: u32, y: u8, u: u8, v: u8) -> Vec<u8> {
 }
 
 fn encode_frame_ivf(pixels: &FramePixels) -> Vec<u8> {
-    encode_to_ivf(std::slice::from_ref(pixels), &wav1c::EncodeConfig::default())
+    encode_to_ivf(
+        std::slice::from_ref(pixels),
+        &wav1c::EncodeConfig::default(),
+    )
 }
 
 fn dav1d_path() -> Option<std::path::PathBuf> {
@@ -357,6 +360,88 @@ fn dav1d_decodes_various_dimensions() {
             stderr
         );
     }
+}
+
+#[test]
+fn dav1d_decodes_moderate_multi_tile_keyframe() {
+    let Some(dav1d) = dav1d_path() else {
+        return;
+    };
+
+    let width = 4160;
+    let height = 2304;
+    let output = encode_solid_ivf(width, height, 128, 128, 128);
+    let (success, stderr, _) = decode_to_y4m(&dav1d, &output, "moderate_multi_tile_key");
+    assert!(success, "dav1d failed for {}x{}: {}", width, height, stderr);
+    assert!(
+        stderr.contains("Decoded 1/1 frames"),
+        "Unexpected decode output: {}",
+        stderr
+    );
+}
+
+#[test]
+fn dav1d_decodes_moderate_multi_tile_inter() {
+    let Some(dav1d) = dav1d_path() else {
+        return;
+    };
+
+    let width = 4160;
+    let height = 2304;
+    let frames = vec![
+        FramePixels::solid(width, height, 96, 128, 128),
+        FramePixels::solid(width, height, 112, 128, 128),
+    ];
+    let output = encode_to_ivf(&frames, &wav1c::EncodeConfig::default());
+    let (success, stderr, _) = decode_to_y4m(&dav1d, &output, "moderate_multi_tile_inter");
+    assert!(success, "dav1d failed for {}x{}: {}", width, height, stderr);
+    assert!(
+        stderr.contains("Decoded 2/2 frames"),
+        "Unexpected decode output: {}",
+        stderr
+    );
+}
+
+#[test]
+#[ignore]
+fn dav1d_decodes_large_dimension_keyframe() {
+    let Some(dav1d) = dav1d_path() else {
+        return;
+    };
+
+    let width = 4284;
+    let height = 5712;
+    let output = encode_solid_ivf(width, height, 128, 128, 128);
+    let (success, stderr, _) = decode_to_y4m(&dav1d, &output, "large_keyframe_4284x5712");
+    assert!(success, "dav1d failed for {}x{}: {}", width, height, stderr);
+    assert!(
+        stderr.contains("Decoded 1/1 frames"),
+        "Unexpected decode output: {}",
+        stderr
+    );
+}
+
+#[test]
+#[ignore]
+fn dav1d_decodes_large_dimension_inter_two_frames() {
+    let Some(dav1d) = dav1d_path() else {
+        return;
+    };
+
+    let width = 4284;
+    let height = 5712;
+    let frames = vec![
+        FramePixels::solid(width, height, 96, 128, 128),
+        FramePixels::solid(width, height, 112, 128, 128),
+    ];
+    let output = encode_to_ivf(&frames, &wav1c::EncodeConfig::default());
+    let (success, stderr, _) = decode_to_y4m(&dav1d, &output, "large_inter_4284x5712");
+    assert!(success, "dav1d failed for {}x{}: {}", width, height, stderr);
+    assert!(
+        stderr.contains("Decoded 2/2 frames"),
+        "Unexpected decode output: {}",
+        stderr
+    );
 }
 
 #[test]

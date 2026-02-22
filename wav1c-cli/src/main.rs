@@ -412,6 +412,24 @@ fn detect_format(path: &str) -> OutputFormat {
     }
 }
 
+fn validate_output_dimensions(format: OutputFormat, width: u32, height: u32) -> Result<(), String> {
+    let max = u16::MAX as u32;
+    if (format == OutputFormat::Ivf || format == OutputFormat::Mp4) && (width > max || height > max)
+    {
+        let label = if format == OutputFormat::Ivf {
+            "IVF"
+        } else {
+            "MP4"
+        };
+        return Err(format!(
+            "{label} output does not support dimensions above 65535x65535 (got {}x{}). \
+             Hint: choose AVIF output for large dimensions.",
+            width, height
+        ));
+    }
+    Ok(())
+}
+
 fn main() {
     let mut cli = parse_cli();
     let format = detect_format(&cli.output_path);
@@ -550,8 +568,7 @@ fn main() {
             if let Some(color_description) = source_color_description {
                 cli.config.video_signal.color_description = Some(color_description);
                 let source_color_range = heic_source_nclx.map(|source| source.color_range);
-                if let (false, Some(color_range)) = (cli.color_range_explicit, source_color_range)
-                {
+                if let (false, Some(color_range)) = (cli.color_range_explicit, source_color_range) {
                     cli.config.video_signal.color_range = color_range;
                 }
             } else {
@@ -569,6 +586,11 @@ fn main() {
 
     let width = frames[0].width;
     let height = frames[0].height;
+    if let Err(message) = validate_output_dimensions(format, width, height) {
+        eprintln!("Error: {message}");
+        process::exit(1);
+    }
+
     let encoder_config = EncoderConfig::from(&cli.config);
     let mut encoder = wav1c::Encoder::new(width, height, encoder_config).unwrap_or_else(|e| {
         eprintln!("Error creating encoder: {:?}", e);
@@ -622,13 +644,7 @@ fn main() {
     let output_size = match format {
         OutputFormat::Ivf => {
             let mut output = Vec::new();
-            ivf::write_ivf_header(
-                &mut output,
-                width as u16,
-                height as u16,
-                packets.len() as u32,
-            )
-            .unwrap();
+            ivf::write_ivf_header(&mut output, width, height, packets.len() as u32).unwrap();
             for p in &packets {
                 ivf::write_ivf_frame(&mut output, p.frame_number, &p.data).unwrap();
             }
@@ -897,5 +913,24 @@ mod tests {
             false,
             false
         ));
+    }
+
+    #[test]
+    fn oversized_ivf_output_is_rejected() {
+        let err = validate_output_dimensions(OutputFormat::Ivf, 70_000, 1_000)
+            .expect_err("expected IVF rejection");
+        assert!(err.contains("IVF output does not support dimensions above 65535x65535"));
+    }
+
+    #[test]
+    fn oversized_mp4_output_is_rejected() {
+        let err = validate_output_dimensions(OutputFormat::Mp4, 1_000, 70_000)
+            .expect_err("expected MP4 rejection");
+        assert!(err.contains("MP4 output does not support dimensions above 65535x65535"));
+    }
+
+    #[test]
+    fn oversized_avif_output_is_allowed() {
+        validate_output_dimensions(OutputFormat::Avif, 70_000, 70_000).expect("expected AVIF ok");
     }
 }

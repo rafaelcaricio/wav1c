@@ -44,6 +44,7 @@ pub struct Encoder {
     config: EncoderConfig,
     width: u32,
     height: u32,
+    sequence_level_idx: u8,
     frame_index: u64,
     rate_ctrl: Option<RateControl>,
     reference: Option<FramePixels>,
@@ -63,9 +64,11 @@ pub struct Encoder {
 
 impl Encoder {
     pub fn new(width: u32, height: u32, config: EncoderConfig) -> Result<Self, EncoderError> {
-        if !(1..=4096).contains(&width) || !(1..=2304).contains(&height) {
+        if width == 0 || height == 0 {
             return Err(EncoderError::InvalidDimensions { width, height });
         }
+
+        preflight_frame_buffer_reserve(width, height)?;
 
         if (config.content_light.is_some() || config.mastering_display.is_some())
             && config.video_signal.bit_depth.bits() != 10
@@ -88,6 +91,7 @@ impl Encoder {
             .map(|bitrate| RateControl::new(bitrate, config.fps, width, height, config.keyint));
 
         Ok(Self {
+            sequence_level_idx: sequence::derive_sequence_level_idx(width, height, config.fps),
             config,
             width,
             height,
@@ -109,8 +113,12 @@ impl Encoder {
     }
 
     pub fn headers(&self) -> Vec<u8> {
-        let seq =
-            sequence::encode_sequence_header(self.width, self.height, &self.config.video_signal);
+        let seq = sequence::encode_sequence_header_with_level(
+            self.width,
+            self.height,
+            &self.config.video_signal,
+            self.sequence_level_idx,
+        );
         let mut out = obu::obu_wrap(obu::ObuType::SequenceHeader, &seq);
         for m in self.metadata_obus() {
             out.extend_from_slice(&m);
@@ -135,7 +143,12 @@ impl Encoder {
         let td = obu::obu_wrap(obu::ObuType::TemporalDelimiter, &[]);
         let seq = obu::obu_wrap(
             obu::ObuType::SequenceHeader,
-            &sequence::encode_sequence_header(self.width, self.height, &self.config.video_signal),
+            &sequence::encode_sequence_header_with_level(
+                self.width,
+                self.height,
+                &self.config.video_signal,
+                self.sequence_level_idx,
+            ),
         );
         let mut out = Vec::new();
         out.extend_from_slice(&td);
@@ -459,6 +472,38 @@ impl Encoder {
     }
 }
 
+fn preflight_frame_buffer_reserve(width: u32, height: u32) -> Result<(), EncoderError> {
+    let fail = |reason: String| EncoderError::AllocationPreflightFailed {
+        width,
+        height,
+        reason,
+    };
+
+    let luma_samples = width
+        .checked_mul(height)
+        .ok_or_else(|| fail("luma sample count overflow".to_owned()))?;
+    let chroma_samples = width
+        .div_ceil(2)
+        .checked_mul(height.div_ceil(2))
+        .ok_or_else(|| fail("chroma sample count overflow".to_owned()))?;
+    let total_samples_per_frame = u64::from(luma_samples) + 2 * u64::from(chroma_samples);
+    let total_samples_reserve = total_samples_per_frame
+        .checked_mul(2)
+        .ok_or_else(|| fail("frame reserve sample count overflow".to_owned()))?;
+    let reserve_elems = usize::try_from(total_samples_reserve)
+        .map_err(|_| fail("frame reserve sample count does not fit platform usize".to_owned()))?;
+
+    let mut preflight = Vec::<u16>::new();
+    preflight.try_reserve_exact(reserve_elems).map_err(|e| {
+        fail(format!(
+            "unable to reserve {} u16 samples for frame buffers: {}",
+            reserve_elems, e
+        ))
+    })?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn new_max_dimensions() {
+    fn new_above_old_dimension_cap_is_valid() {
         let config = EncoderConfig {
             base_q_idx: 128,
             keyint: 25,
@@ -512,7 +557,7 @@ mod tests {
             content_light: None,
             mastering_display: None,
         };
-        assert!(Encoder::new(4096, 2304, config).is_ok());
+        assert!(Encoder::new(4097, 2305, config).is_ok());
     }
 
     #[test]
@@ -540,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn new_invalid_width_too_large() {
+    fn new_extremely_large_dimensions_fail_preflight() {
         let config = EncoderConfig {
             base_q_idx: 128,
             keyint: 25,
@@ -552,7 +597,12 @@ mod tests {
             content_light: None,
             mastering_display: None,
         };
-        assert!(Encoder::new(4097, 64, config).is_err());
+        let result = Encoder::new(u32::MAX, u32::MAX, config);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            EncoderError::AllocationPreflightFailed { .. } => {}
+            other => panic!("expected AllocationPreflightFailed, got {other:?}"),
+        }
     }
 
     #[test]
@@ -572,7 +622,7 @@ mod tests {
     }
 
     #[test]
-    fn new_invalid_height_too_large() {
+    fn new_height_above_old_cap_is_valid() {
         let config = EncoderConfig {
             base_q_idx: 128,
             keyint: 25,
@@ -584,7 +634,7 @@ mod tests {
             content_light: None,
             mastering_display: None,
         };
-        assert!(Encoder::new(64, 2305, config).is_err());
+        assert!(Encoder::new(64, 2305, config).is_ok());
     }
 
     #[test]

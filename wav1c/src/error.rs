@@ -6,6 +6,11 @@ pub enum EncoderError {
         width: u32,
         height: u32,
     },
+    AllocationPreflightFailed {
+        width: u32,
+        height: u32,
+        reason: String,
+    },
     DimensionMismatch {
         expected_w: u32,
         expected_h: u32,
@@ -34,8 +39,19 @@ impl fmt::Display for EncoderError {
             EncoderError::InvalidDimensions { width, height } => {
                 write!(
                     f,
-                    "invalid dimensions {}x{}: width must be 1..=4096, height must be 1..=2304",
+                    "invalid dimensions {}x{}: width and height must both be > 0",
                     width, height
+                )
+            }
+            EncoderError::AllocationPreflightFailed {
+                width,
+                height,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "allocation preflight failed for {}x{} frame buffers: {}",
+                    width, height, reason
                 )
             }
             EncoderError::DimensionMismatch {

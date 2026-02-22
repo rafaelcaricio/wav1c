@@ -28,11 +28,14 @@ A spec-compliant AV1 encoder written from scratch in safe Rust with zero runtime
   - Typed parse errors for malformed/truncated input
 - Intra + inter coding pipeline with RD decisions, transforms, and entropy coding
 - B-frame pipeline support
-- Stream dimensions: `1..=4096` width and `1..=2304` height
+- Large-dimension support in core encoder via AV1 multi-tile payload assembly (memory permitting)
 
 Current scope limits:
 - Chroma format: 4:2:0 only
 - Bit depth: 8/10-bit only (no 12-bit)
+- Container limits in CLI:
+  - IVF/MP4: `width <= 65535`, `height <= 65535`
+  - AVIF: large dimensions supported
 
 ## Workspace Layout
 
@@ -300,7 +303,7 @@ For a full HEIC -> HDR AV1 workflow (CLI and FFmpeg), including verification wit
 Practical note for HEIC inputs:
 - Some HEIC files decode as tile grids.
 - Do not force-map an individual dependent tile if you want the full composed image.
-- If source height is above `2304`, resize before encoding (current encoder limit).
+- For very large outputs, prefer AVIF when IVF/MP4 16-bit container dimensions would be exceeded.
 
 ## Testing
 

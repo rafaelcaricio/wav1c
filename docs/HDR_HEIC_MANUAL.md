@@ -92,7 +92,6 @@ After building FFmpeg with `--enable-libwav1c`, you can encode directly:
 ffmpeg -y -v error \
   -i /Users/rafaelcaricio/development/wav1c/photo_hdr.heic \
   -frames:v 1 \
-  -s 3072x2304 \
   -pix_fmt yuv420p10le \
   -color_range pc \
   -color_primaries bt2020 \
@@ -123,7 +122,9 @@ ffprobe -v error -show_streams /tmp/ffmpeg_libwav1c_hdr.ivf
   composed image.
 - Use the section 6 command (without `-map 0:v:0`) to keep the composed image
   path in FFmpeg's `libwav1c` integration.
-- `wav1c` currently supports up to `4096x2304`; downscale larger sources first.
+- Container limits still apply in CLI workflows:
+  - IVF/MP4 require `width <= 65535` and `height <= 65535`.
+  - AVIF supports larger dimensions.
 - This implementation is 4:2:0 only (`yuv420p`, `yuv420p10le`).
 - 8-bit SDR behavior remains available and backward compatible.
 - HDR metadata OBUs (CLL/MDCV) are emitted only when provided.

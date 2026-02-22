@@ -1,5 +1,6 @@
 use crate::cdf::CdfContext;
 use crate::dequant::DequantValues;
+use crate::frame::{TilePlan, TileRect};
 use crate::msac::MsacEncoder;
 use crate::y4m::FramePixels;
 use std::cmp::min;
@@ -2676,6 +2677,146 @@ pub fn encode_tile_with_recon(
     (tile.enc.finalize(), tile.recon)
 }
 
+fn empty_frame_like(pixels: &FramePixels) -> FramePixels {
+    let cw = pixels.width.div_ceil(2);
+    let ch = pixels.height.div_ceil(2);
+    let mid_value = pixels.bit_depth.mid_value();
+    FramePixels {
+        width: pixels.width,
+        height: pixels.height,
+        bit_depth: pixels.bit_depth,
+        color_range: pixels.color_range,
+        y: vec![mid_value; (pixels.width * pixels.height) as usize],
+        u: vec![mid_value; (cw * ch) as usize],
+        v: vec![mid_value; (cw * ch) as usize],
+    }
+}
+
+fn tile_rect_to_pixel_bounds(rect: &TileRect, width: u32, height: u32) -> (u32, u32, u32, u32) {
+    let x0 = rect.sb_col_start * 64;
+    let y0 = rect.sb_row_start * 64;
+    let x1 = (rect.sb_col_end * 64).min(width);
+    let y1 = (rect.sb_row_end * 64).min(height);
+    (x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
+}
+
+fn copy_plane_region(
+    source: &[u16],
+    source_stride: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Vec<u16> {
+    let mut out = Vec::with_capacity((width * height) as usize);
+    for row in 0..height {
+        let start = ((y + row) * source_stride + x) as usize;
+        let end = start + width as usize;
+        out.extend_from_slice(&source[start..end]);
+    }
+    out
+}
+
+fn paste_plane_region(
+    destination: &mut [u16],
+    destination_stride: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    source: &[u16],
+) {
+    for row in 0..height {
+        let dst_start = ((y + row) * destination_stride + x) as usize;
+        let dst_end = dst_start + width as usize;
+        let src_start = (row * width) as usize;
+        let src_end = src_start + width as usize;
+        destination[dst_start..dst_end].copy_from_slice(&source[src_start..src_end]);
+    }
+}
+
+fn crop_tile_region(frame: &FramePixels, rect: &TileRect) -> FramePixels {
+    let (x, y, width, height) = tile_rect_to_pixel_bounds(rect, frame.width, frame.height);
+    let cx = x / 2;
+    let cy = y / 2;
+    let cw = width.div_ceil(2);
+    let ch = height.div_ceil(2);
+
+    FramePixels {
+        width,
+        height,
+        bit_depth: frame.bit_depth,
+        color_range: frame.color_range,
+        y: copy_plane_region(&frame.y, frame.width, x, y, width, height),
+        u: copy_plane_region(&frame.u, frame.width.div_ceil(2), cx, cy, cw, ch),
+        v: copy_plane_region(&frame.v, frame.width.div_ceil(2), cx, cy, cw, ch),
+    }
+}
+
+fn stitch_tile_region(destination: &mut FramePixels, source: &FramePixels, rect: &TileRect) {
+    let (x, y, width, height) =
+        tile_rect_to_pixel_bounds(rect, destination.width, destination.height);
+    debug_assert_eq!(source.width, width);
+    debug_assert_eq!(source.height, height);
+
+    let cx = x / 2;
+    let cy = y / 2;
+    let cw = width.div_ceil(2);
+    let ch = height.div_ceil(2);
+
+    paste_plane_region(
+        &mut destination.y,
+        destination.width,
+        x,
+        y,
+        width,
+        height,
+        &source.y,
+    );
+    paste_plane_region(
+        &mut destination.u,
+        destination.width.div_ceil(2),
+        cx,
+        cy,
+        cw,
+        ch,
+        &source.u,
+    );
+    paste_plane_region(
+        &mut destination.v,
+        destination.width.div_ceil(2),
+        cx,
+        cy,
+        cw,
+        ch,
+        &source.v,
+    );
+}
+
+pub fn encode_tiles_with_recon(
+    pixels: &FramePixels,
+    dq: DequantValues,
+    base_q_idx: u8,
+    plan: &TilePlan,
+) -> (Vec<Vec<u8>>, FramePixels) {
+    if plan.tiles.len() == 1 {
+        let (bytes, recon) = encode_tile_with_recon(pixels, dq, base_q_idx);
+        return (vec![bytes], recon);
+    }
+
+    let mut all_tiles = Vec::with_capacity(plan.tiles.len());
+    let mut stitched_recon = empty_frame_like(pixels);
+
+    for rect in &plan.tiles {
+        let tile_pixels = crop_tile_region(pixels, rect);
+        let (tile_bytes, tile_recon) = encode_tile_with_recon(&tile_pixels, dq, base_q_idx);
+        stitch_tile_region(&mut stitched_recon, &tile_recon, rect);
+        all_tiles.push(tile_bytes);
+    }
+
+    (all_tiles, stitched_recon)
+}
+
 struct InterTileEncoder<'a> {
     enc: MsacEncoder,
     cdf: CdfContext,
@@ -3524,12 +3665,13 @@ fn estimate_global_motion(
     (best_dx * 4, best_dy * 4)
 }
 
-pub fn encode_inter_tile_with_recon(
+fn encode_inter_tile_with_recon_with_global_mv(
     pixels: &FramePixels,
     reference: &FramePixels,
     forward_reference: Option<&FramePixels>,
     dq: DequantValues,
     base_q_idx: u8,
+    global_mv: (i32, i32),
 ) -> (Vec<u8>, FramePixels) {
     assert_eq!(
         pixels.width, reference.width,
@@ -3539,7 +3681,6 @@ pub fn encode_inter_tile_with_recon(
         pixels.height, reference.height,
         "reference frame height mismatch"
     );
-    let global_mv = estimate_global_motion(&pixels.y, &reference.y, pixels.width, pixels.height);
     let mut tile = InterTileEncoder::new(
         pixels,
         reference,
@@ -3563,6 +3704,87 @@ pub fn encode_inter_tile_with_recon(
 
     let tile_bytes = tile.enc.finalize();
     (tile_bytes, tile.recon)
+}
+
+pub fn encode_inter_tile_with_recon(
+    pixels: &FramePixels,
+    reference: &FramePixels,
+    forward_reference: Option<&FramePixels>,
+    dq: DequantValues,
+    base_q_idx: u8,
+) -> (Vec<u8>, FramePixels) {
+    let global_mv = estimate_global_motion(&pixels.y, &reference.y, pixels.width, pixels.height);
+    encode_inter_tile_with_recon_with_global_mv(
+        pixels,
+        reference,
+        forward_reference,
+        dq,
+        base_q_idx,
+        global_mv,
+    )
+}
+
+pub fn encode_inter_tiles_with_recon(
+    pixels: &FramePixels,
+    reference: &FramePixels,
+    forward_reference: Option<&FramePixels>,
+    dq: DequantValues,
+    base_q_idx: u8,
+    plan: &TilePlan,
+) -> (Vec<Vec<u8>>, FramePixels) {
+    assert_eq!(
+        pixels.width, reference.width,
+        "reference frame width mismatch"
+    );
+    assert_eq!(
+        pixels.height, reference.height,
+        "reference frame height mismatch"
+    );
+    if let Some(fwd) = forward_reference {
+        assert_eq!(
+            pixels.width, fwd.width,
+            "forward reference frame width mismatch"
+        );
+        assert_eq!(
+            pixels.height, fwd.height,
+            "forward reference frame height mismatch"
+        );
+    }
+
+    let global_mv = estimate_global_motion(&pixels.y, &reference.y, pixels.width, pixels.height);
+    if plan.tiles.len() == 1 {
+        let (bytes, recon) = encode_inter_tile_with_recon_with_global_mv(
+            pixels,
+            reference,
+            forward_reference,
+            dq,
+            base_q_idx,
+            global_mv,
+        );
+        return (vec![bytes], recon);
+    }
+
+    let mut all_tiles = Vec::with_capacity(plan.tiles.len());
+    let mut stitched_recon = empty_frame_like(pixels);
+
+    for rect in &plan.tiles {
+        let tile_pixels = crop_tile_region(pixels, rect);
+        let tile_reference = crop_tile_region(reference, rect);
+        let tile_forward_reference = forward_reference.map(|fwd| crop_tile_region(fwd, rect));
+
+        let (tile_bytes, tile_recon) = encode_inter_tile_with_recon_with_global_mv(
+            &tile_pixels,
+            &tile_reference,
+            tile_forward_reference.as_ref(),
+            dq,
+            base_q_idx,
+            global_mv,
+        );
+        stitch_tile_region(&mut stitched_recon, &tile_recon, rect);
+        all_tiles.push(tile_bytes);
+    }
+
+    (all_tiles, stitched_recon)
 }
 
 fn decompose_mv_diff(diff: u32) -> (u32, u32, u32) {

@@ -1,6 +1,78 @@
 use crate::bitwriter::BitWriter;
 use crate::video::{BitDepth, ColorRange, VideoSignal};
 
+pub const SEQ_LEVEL_IDX_5_1: u8 = 13;
+pub const SEQ_LEVEL_IDX_MAX_PARAMETERS: u8 = 31;
+
+#[derive(Clone, Copy)]
+struct LevelConstraint {
+    seq_level_idx: u8,
+    max_pic_size: u64,
+    max_h_size: u32,
+    max_v_size: u32,
+    max_display_rate: u64,
+    max_decode_rate: u64,
+}
+
+const LEVEL_CONSTRAINTS: [LevelConstraint; 7] = [
+    LevelConstraint {
+        seq_level_idx: 13, // 5.1
+        max_pic_size: 8_912_896,
+        max_h_size: 8_192,
+        max_v_size: 4_352,
+        max_display_rate: 534_773_760,
+        max_decode_rate: 547_430_400,
+    },
+    LevelConstraint {
+        seq_level_idx: 14, // 5.2
+        max_pic_size: 8_912_896,
+        max_h_size: 8_192,
+        max_v_size: 4_352,
+        max_display_rate: 1_069_547_520,
+        max_decode_rate: 1_094_860_800,
+    },
+    LevelConstraint {
+        seq_level_idx: 15, // 5.3
+        max_pic_size: 8_912_896,
+        max_h_size: 8_192,
+        max_v_size: 4_352,
+        max_display_rate: 1_069_547_520,
+        max_decode_rate: 1_176_502_272,
+    },
+    LevelConstraint {
+        seq_level_idx: 16, // 6.0
+        max_pic_size: 35_651_584,
+        max_h_size: 16_384,
+        max_v_size: 8_704,
+        max_display_rate: 1_069_547_520,
+        max_decode_rate: 1_176_502_272,
+    },
+    LevelConstraint {
+        seq_level_idx: 17, // 6.1
+        max_pic_size: 35_651_584,
+        max_h_size: 16_384,
+        max_v_size: 8_704,
+        max_display_rate: 2_139_095_040,
+        max_decode_rate: 2_189_721_600,
+    },
+    LevelConstraint {
+        seq_level_idx: 18, // 6.2
+        max_pic_size: 35_651_584,
+        max_h_size: 16_384,
+        max_v_size: 8_704,
+        max_display_rate: 4_278_190_080,
+        max_decode_rate: 4_379_443_200,
+    },
+    LevelConstraint {
+        seq_level_idx: 19, // 6.3
+        max_pic_size: 35_651_584,
+        max_h_size: 16_384,
+        max_v_size: 8_704,
+        max_display_rate: 4_278_190_080,
+        max_decode_rate: 4_706_009_088,
+    },
+];
+
 fn bits_needed(v: u32) -> u8 {
     if v == 0 {
         1
@@ -9,7 +81,41 @@ fn bits_needed(v: u32) -> u8 {
     }
 }
 
+pub fn derive_sequence_level_idx(width: u32, height: u32, fps: f64) -> u8 {
+    let pic_size = width as u64 * height as u64;
+    let fps = if fps.is_finite() && fps > 0.0 {
+        fps
+    } else {
+        1.0
+    };
+    let display_rate = pic_size as f64 * fps;
+    let decode_rate = display_rate;
+
+    for level in LEVEL_CONSTRAINTS {
+        if width <= level.max_h_size
+            && height <= level.max_v_size
+            && pic_size <= level.max_pic_size
+            && display_rate <= level.max_display_rate as f64
+            && decode_rate <= level.max_decode_rate as f64
+        {
+            return level.seq_level_idx.max(SEQ_LEVEL_IDX_5_1);
+        }
+    }
+
+    SEQ_LEVEL_IDX_MAX_PARAMETERS
+}
+
 pub fn encode_sequence_header(width: u32, height: u32, signal: &VideoSignal) -> Vec<u8> {
+    let seq_level_idx = derive_sequence_level_idx(width, height, 25.0);
+    encode_sequence_header_with_level(width, height, signal, seq_level_idx)
+}
+
+pub fn encode_sequence_header_with_level(
+    width: u32,
+    height: u32,
+    signal: &VideoSignal,
+    seq_level_idx: u8,
+) -> Vec<u8> {
     let mut w = BitWriter::new();
 
     let seq_profile = 0u64;
@@ -19,7 +125,6 @@ pub fn encode_sequence_header(width: u32, height: u32, signal: &VideoSignal) -> 
     let initial_display_delay_present = false;
     let operating_points_cnt_minus_1 = 0u64;
     let operating_point_idc = 0u64;
-    let seq_level_idx = 13u64;
 
     w.write_bits(seq_profile, 3);
     w.write_bit(still_picture);
@@ -28,7 +133,7 @@ pub fn encode_sequence_header(width: u32, height: u32, signal: &VideoSignal) -> 
     w.write_bit(initial_display_delay_present);
     w.write_bits(operating_points_cnt_minus_1, 5);
     w.write_bits(operating_point_idc, 12);
-    w.write_bits(seq_level_idx, 5);
+    w.write_bits(seq_level_idx as u64, 5);
     w.write_bit(false);
 
     let frame_width_bits_minus_1 = bits_needed(width - 1) - 1;
@@ -214,5 +319,23 @@ mod tests {
         let hdr = encode_sequence_header(320, 240, &VideoSignal::hdr10(ColorRange::Limited));
         assert_ne!(sdr, hdr);
         assert!(hdr.len() > sdr.len());
+    }
+
+    #[test]
+    fn derive_level_small_frames_floor_to_5_1() {
+        let level = derive_sequence_level_idx(320, 240, 25.0);
+        assert_eq!(level, SEQ_LEVEL_IDX_5_1);
+    }
+
+    #[test]
+    fn derive_level_large_frame_selects_higher_level() {
+        let level = derive_sequence_level_idx(4284, 5712, 25.0);
+        assert!(level > SEQ_LEVEL_IDX_5_1);
+    }
+
+    #[test]
+    fn derive_level_out_of_table_falls_back_to_max_parameters() {
+        let level = derive_sequence_level_idx(20_000, 20_000, 30.0);
+        assert_eq!(level, SEQ_LEVEL_IDX_MAX_PARAMETERS);
     }
 }

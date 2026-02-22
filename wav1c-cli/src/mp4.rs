@@ -42,11 +42,9 @@ pub fn fps_to_rational(fps: f64) -> (u32, u32) {
     ((fps * 1000.0).round() as u32, 1000)
 }
 
-pub fn write_mp4<W: Write>(
-    w: &mut W,
-    config: &Mp4Config,
-    samples: &[Mp4Sample],
-) -> io::Result<()> {
+pub fn write_mp4<W: Write>(w: &mut W, config: &Mp4Config, samples: &[Mp4Sample]) -> io::Result<()> {
+    validate_mp4_dimensions(config.width, config.height)?;
+
     let ftyp = build_ftyp();
 
     let mut mdat_payload = Vec::new();
@@ -61,6 +59,31 @@ pub fn write_mp4<W: Write>(
     w.write_all(&ftyp)?;
     w.write_all(&mdat)?;
     w.write_all(&moov)?;
+    Ok(())
+}
+
+fn validate_mp4_dimensions(width: u32, height: u32) -> io::Result<()> {
+    let max = u16::MAX as u32;
+    if width > max {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "MP4 av01 sample entry width {} exceeds 16-bit limit (max {})",
+                width,
+                u16::MAX
+            ),
+        ));
+    }
+    if height > max {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "MP4 av01 sample entry height {} exceeds 16-bit limit (max {})",
+                height,
+                u16::MAX
+            ),
+        ));
+    }
     Ok(())
 }
 
@@ -106,7 +129,13 @@ fn build_moov(config: &Mp4Config, samples: &[Mp4Sample], data_offset: u32) -> Ve
     };
 
     let mvhd = build_mvhd(total_ms as u32);
-    let trak = build_trak(config, samples, data_offset, media_duration as u32, total_ms as u32);
+    let trak = build_trak(
+        config,
+        samples,
+        data_offset,
+        media_duration as u32,
+        total_ms as u32,
+    );
 
     let mut payload = Vec::new();
     payload.extend_from_slice(&mvhd);
@@ -123,9 +152,7 @@ fn build_mvhd(duration_ms: u32) -> Vec<u8> {
     p.extend_from_slice(&0x00010000u32.to_be_bytes());
     p.extend_from_slice(&0x0100u16.to_be_bytes());
     p.extend_from_slice(&[0u8; 10]);
-    let matrix: [u32; 9] = [
-        0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000,
-    ];
+    let matrix: [u32; 9] = [0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000];
     for m in &matrix {
         p.extend_from_slice(&m.to_be_bytes());
     }
@@ -164,9 +191,7 @@ fn build_tkhd(config: &Mp4Config, duration_ms: u32) -> Vec<u8> {
     p.extend_from_slice(&0u16.to_be_bytes());
     p.extend_from_slice(&0u16.to_be_bytes());
     p.extend_from_slice(&0u16.to_be_bytes());
-    let matrix: [u32; 9] = [
-        0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000,
-    ];
+    let matrix: [u32; 9] = [0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000];
     for m in &matrix {
         p.extend_from_slice(&m.to_be_bytes());
     }
@@ -292,7 +317,10 @@ fn build_av01(config: &Mp4Config) -> Vec<u8> {
     p.extend_from_slice(&0x0018u16.to_be_bytes());
     p.extend_from_slice(&0xFFFFu16.to_be_bytes());
 
-    p.extend_from_slice(&build_av1c(config.video_signal.bit_depth, &config.config_obus));
+    p.extend_from_slice(&build_av1c(
+        config.video_signal.bit_depth,
+        &config.config_obus,
+    ));
     p.extend_from_slice(&build_colr(&config.video_signal));
     p.extend_from_slice(&build_pasp());
 
@@ -390,4 +418,38 @@ fn build_stss(samples: &[Mp4Sample]) -> Vec<u8> {
         p.extend_from_slice(&idx.to_be_bytes());
     }
     full_box(b"stss", 0, 0, &p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_config() -> Mp4Config {
+        Mp4Config {
+            width: 64,
+            height: 64,
+            fps_num: 25,
+            fps_den: 1,
+            config_obus: Vec::new(),
+            video_signal: VideoSignal::default(),
+        }
+    }
+
+    #[test]
+    fn rejects_width_above_u16_limit() {
+        let mut cfg = base_config();
+        cfg.width = 70_000;
+        let mut out = Vec::new();
+        let err = write_mp4(&mut out, &cfg, &[]).expect_err("expected rejection");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn rejects_height_above_u16_limit() {
+        let mut cfg = base_config();
+        cfg.height = 70_000;
+        let mut out = Vec::new();
+        let err = write_mp4(&mut out, &cfg, &[]).expect_err("expected rejection");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
 }
