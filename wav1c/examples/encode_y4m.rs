@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use wav1c::EncodeConfig;
 use wav1c::y4m::FramePixels;
@@ -14,6 +15,29 @@ fn print_usage() {
     eprintln!("  --gop-size N     Mini-GOP size for B-frames (default: 3)");
     eprintln!("  --bitrate N      Target bitrate in kbps (enables rate control)");
     eprintln!("  --fps N          Frames per second (default: 25)");
+}
+
+fn write_ivf(frames: &[FramePixels], config: &EncodeConfig) -> Vec<u8> {
+    let packets = wav1c::encode_packets(frames, config);
+    let width = frames[0].width as u16;
+    let height = frames[0].height as u16;
+    let mut out = Vec::new();
+    out.write_all(b"DKIF").unwrap();
+    out.write_all(&0u16.to_le_bytes()).unwrap();
+    out.write_all(&32u16.to_le_bytes()).unwrap();
+    out.write_all(b"AV01").unwrap();
+    out.write_all(&width.to_le_bytes()).unwrap();
+    out.write_all(&height.to_le_bytes()).unwrap();
+    out.write_all(&25u32.to_le_bytes()).unwrap();
+    out.write_all(&1u32.to_le_bytes()).unwrap();
+    out.write_all(&(packets.len() as u32).to_le_bytes()).unwrap();
+    out.write_all(&0u32.to_le_bytes()).unwrap();
+    for p in &packets {
+        out.write_all(&(p.data.len() as u32).to_le_bytes()).unwrap();
+        out.write_all(&p.frame_number.to_le_bytes()).unwrap();
+        out.write_all(&p.data).unwrap();
+    }
+    out
 }
 
 fn main() {
@@ -71,7 +95,7 @@ fn main() {
         "Encoding (q={}, keyint={}, b_frames={}, gop_size={})...",
         config.base_q_idx, config.keyint, config.b_frames, config.gop_size
     );
-    let ivf_data = wav1c::encode(&frames, &config);
+    let ivf_data = write_ivf(&frames, &config);
 
     println!("Writing to {}...", output_path);
     fs::write(output_path, &ivf_data).expect("Failed to write IVF");

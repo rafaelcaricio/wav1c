@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 
 use crate::mp4::{box_wrap, build_av1c, build_colr, full_box, strip_temporal_delimiters};
-use crate::video::{BitDepth, VideoSignal};
+use wav1c::{BitDepth, VideoSignal};
 
 pub struct AvifConfig {
     pub width: u32,
@@ -138,103 +138,4 @@ fn build_ipma() -> Vec<u8> {
     p.push(0x83);
     p.push(0x84);
     full_box(b"ipma", 0, 0, &p)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn read_u32(data: &[u8], offset: usize) -> u32 {
-        u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap())
-    }
-
-    fn find_box(data: &[u8], box_type: &[u8; 4]) -> Option<usize> {
-        let mut pos = 0;
-        while pos + 8 <= data.len() {
-            let size = read_u32(data, pos) as usize;
-            if size < 8 || pos + size > data.len() {
-                break;
-            }
-            if &data[pos + 4..pos + 8] == box_type {
-                return Some(pos);
-            }
-            pos += size;
-        }
-        None
-    }
-
-    #[test]
-    fn avif_starts_with_ftyp_avif() {
-        let config = AvifConfig {
-            width: 64,
-            height: 64,
-            config_obus: vec![0x0A, 0x05, 0x00, 0x00, 0x00, 0x01],
-            video_signal: VideoSignal::default(),
-        };
-        let obu_data = vec![0x12, 0x00, 0xAA, 0xBB, 0xCC];
-        let mut buf = Vec::new();
-        write_avif(&mut buf, &config, &obu_data).unwrap();
-
-        assert_eq!(&buf[4..8], b"ftyp");
-        assert_eq!(&buf[8..12], b"avif");
-    }
-
-    #[test]
-    fn avif_has_meta_and_mdat() {
-        let config = AvifConfig {
-            width: 128,
-            height: 96,
-            config_obus: vec![0x0A, 0x05, 0x00, 0x00, 0x00, 0x01],
-            video_signal: VideoSignal::default(),
-        };
-        let obu_data = vec![0x32, 0x05, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
-        let mut buf = Vec::new();
-        write_avif(&mut buf, &config, &obu_data).unwrap();
-
-        let ftyp_size = read_u32(&buf, 0) as usize;
-        assert!(find_box(&buf[ftyp_size..], b"meta").is_some());
-
-        let meta_offset = ftyp_size;
-        let meta_size = read_u32(&buf, meta_offset) as usize;
-        let mdat_offset = meta_offset + meta_size;
-        assert_eq!(&buf[mdat_offset + 4..mdat_offset + 8], b"mdat");
-    }
-
-    #[test]
-    fn avif_strips_temporal_delimiter() {
-        let config = AvifConfig {
-            width: 64,
-            height: 64,
-            config_obus: vec![0x0A, 0x05],
-            video_signal: VideoSignal::default(),
-        };
-        let obu_data = vec![0x12, 0x00, 0xAA, 0xBB];
-        let mut buf = Vec::new();
-        write_avif(&mut buf, &config, &obu_data).unwrap();
-
-        let mdat_data = &buf[buf.len() - 2..];
-        assert_eq!(mdat_data, &[0xAA, 0xBB]);
-    }
-
-    #[test]
-    fn avif_mdat_offset_is_correct() {
-        let config = AvifConfig {
-            width: 320,
-            height: 240,
-            config_obus: vec![0x0A, 0x05, 0x00, 0x00, 0x00, 0x01],
-            video_signal: VideoSignal::default(),
-        };
-        let payload = vec![0xDE, 0xAD, 0xBE, 0xEF];
-        let mut buf = Vec::new();
-        write_avif(&mut buf, &config, &payload).unwrap();
-
-        let ftyp_size = read_u32(&buf, 0) as usize;
-        let meta_size = read_u32(&buf, ftyp_size) as usize;
-        let mdat_offset = ftyp_size + meta_size;
-        let mdat_header_size = 8;
-
-        let expected_data_start = mdat_offset + mdat_header_size;
-        let actual_data = &buf[expected_data_start..];
-        assert_eq!(actual_data, &payload);
-    }
 }

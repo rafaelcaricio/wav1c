@@ -1,3 +1,4 @@
+use std::io::Write;
 use wav1c::y4m::FramePixels;
 
 fn find_dav1d() -> Option<std::path::PathBuf> {
@@ -53,6 +54,30 @@ fn create_test_y4m(
         }
     }
     data
+}
+
+fn encode_to_ivf(pixels: &FramePixels) -> Vec<u8> {
+    let config = wav1c::EncodeConfig::default();
+    let packets = wav1c::encode_packets(std::slice::from_ref(pixels), &config);
+    let width = pixels.width as u16;
+    let height = pixels.height as u16;
+    let mut out = Vec::new();
+    out.write_all(b"DKIF").unwrap();
+    out.write_all(&0u16.to_le_bytes()).unwrap();
+    out.write_all(&32u16.to_le_bytes()).unwrap();
+    out.write_all(b"AV01").unwrap();
+    out.write_all(&width.to_le_bytes()).unwrap();
+    out.write_all(&height.to_le_bytes()).unwrap();
+    out.write_all(&25u32.to_le_bytes()).unwrap();
+    out.write_all(&1u32.to_le_bytes()).unwrap();
+    out.write_all(&(packets.len() as u32).to_le_bytes()).unwrap();
+    out.write_all(&0u32.to_le_bytes()).unwrap();
+    for p in &packets {
+        out.write_all(&(p.data.len() as u32).to_le_bytes()).unwrap();
+        out.write_all(&p.frame_number.to_le_bytes()).unwrap();
+        out.write_all(&p.data).unwrap();
+    }
+    out
 }
 
 fn main() {
@@ -111,7 +136,7 @@ fn test_pattern(
 ) {
     let y4m_data = create_test_y4m(w, h, f);
     let pixels = FramePixels::from_y4m(&y4m_data);
-    let output = wav1c::encode_av1_ivf_y4m(&pixels);
+    let output = encode_to_ivf(&pixels);
 
     let ivf_path = std::env::temp_dir().join(format!("wav1c_{}.ivf", name));
     let y4m_path = std::env::temp_dir().join(format!("wav1c_{}.y4m", name));

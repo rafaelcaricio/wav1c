@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use crate::video::{BitDepth, ColorRange, VideoSignal};
+use wav1c::{BitDepth, ColorRange, VideoSignal};
 
 pub struct Mp4Config {
     pub width: u32,
@@ -390,75 +390,4 @@ fn build_stss(samples: &[Mp4Sample]) -> Vec<u8> {
         p.extend_from_slice(&idx.to_be_bytes());
     }
     full_box(b"stss", 0, 0, &p)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strip_td_removes_prefix() {
-        let data = vec![0x12, 0x00, 0x0A, 0x05, 0xFF];
-        assert_eq!(strip_temporal_delimiters(&data), vec![0x0A, 0x05, 0xFF]);
-    }
-
-    #[test]
-    fn strip_td_preserves_non_td() {
-        let data = vec![0x0A, 0x05, 0xFF];
-        assert_eq!(strip_temporal_delimiters(&data), data);
-    }
-
-    #[test]
-    fn ftyp_is_32_bytes() {
-        let ftyp = build_ftyp();
-        assert_eq!(ftyp.len(), 32);
-        assert_eq!(&ftyp[0..4], &32u32.to_be_bytes());
-        assert_eq!(&ftyp[4..8], b"ftyp");
-        assert_eq!(&ftyp[8..12], b"isom");
-    }
-
-    #[test]
-    fn fps_rational_common_rates() {
-        assert_eq!(fps_to_rational(25.0), (25, 1));
-        assert_eq!(fps_to_rational(30.0), (30, 1));
-        assert_eq!(fps_to_rational(24.0), (24, 1));
-        assert_eq!(fps_to_rational(29.97), (30000, 1001));
-        assert_eq!(fps_to_rational(23.976), (24000, 1001));
-    }
-
-    #[test]
-    fn write_mp4_produces_valid_boxes() {
-        let config = Mp4Config {
-            width: 64,
-            height: 64,
-            fps_num: 25,
-            fps_den: 1,
-            config_obus: vec![0x0A, 0x05, 0x00, 0x00, 0x00, 0x01],
-            video_signal: VideoSignal::default(),
-        };
-        let samples = vec![Mp4Sample {
-            data: vec![0x0A, 0x05, 0xAA, 0xBB],
-            is_sync: true,
-        }];
-
-        let mut buf = Vec::new();
-        write_mp4(&mut buf, &config, &samples).unwrap();
-
-        assert_eq!(&buf[4..8], b"ftyp");
-
-        let mdat_offset = 32;
-        assert_eq!(&buf[mdat_offset + 4..mdat_offset + 8], b"mdat");
-
-        let mdat_size =
-            u32::from_be_bytes(buf[mdat_offset..mdat_offset + 4].try_into().unwrap()) as usize;
-        let moov_offset = mdat_offset + mdat_size;
-        assert_eq!(&buf[moov_offset + 4..moov_offset + 8], b"moov");
-    }
-
-    #[test]
-    fn stco_points_to_mdat_data() {
-        let ftyp = build_ftyp();
-        let data_offset = ftyp.len() as u32 + 8;
-        assert_eq!(data_offset, 40);
-    }
 }

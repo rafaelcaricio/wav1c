@@ -1,4 +1,11 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
+
+mod avif;
+mod ivf;
+mod mp4;
+
+#[cfg(feature = "heic")]
+mod heic;
 
 use std::env;
 use std::fs::File;
@@ -32,6 +39,8 @@ enum InputMode {
         width: u32,
         height: u32,
     },
+    #[cfg(feature = "heic")]
+    Heic(String),
 }
 
 fn parse_bitrate(s: &str) -> Result<u64, String> {
@@ -245,6 +254,20 @@ fn parse_cli() -> CliArgs {
 
     let input = if positional.len() == 1 && positional[0].ends_with(".y4m") {
         InputMode::Y4m(positional[0].clone())
+    } else if positional.len() == 1
+        && (positional[0].ends_with(".heic") || positional[0].ends_with(".heif"))
+    {
+        #[cfg(feature = "heic")]
+        {
+            InputMode::Heic(positional[0].clone())
+        }
+        #[cfg(not(feature = "heic"))]
+        {
+            eprintln!(
+                "Error: HEIC input requires building with --features heic (needs libheif)"
+            );
+            process::exit(1);
+        }
     } else if positional.len() == 2 && pattern.is_some() {
         let width = positional[0].parse::<u32>().unwrap_or_else(|_| {
             eprintln!("Error: width must be a positive integer");
@@ -306,7 +329,7 @@ fn parse_cli() -> CliArgs {
 }
 
 fn print_usage() {
-    eprintln!("Usage: wav1c <input.y4m> -o <output.ivf|mp4|avif> [options]");
+    eprintln!("Usage: wav1c <input.y4m|heic> -o <output.ivf|mp4|avif> [options]");
     eprintln!("       wav1c <width> <height> <Y> <U> <V> -o <output.ivf|mp4|avif> [options]");
     eprintln!("       wav1c <width> <height> --pattern <name> -o <output.ivf|mp4|avif> [options]");
     eprintln!();
@@ -324,6 +347,30 @@ fn print_usage() {
     eprintln!("  --max-fall <u16>        Content light level metadata");
     eprintln!("  --mdcv <rx,ry,gx,gy,bx,by,wx,wy,max_lum,min_lum>");
     eprintln!("  --pattern <name>        Test pattern (grid)");
+}
+
+fn scale_bit_depth(
+    mut frame: wav1c::y4m::FramePixels,
+    target: BitDepth,
+) -> wav1c::y4m::FramePixels {
+    let shift = match (frame.bit_depth, target) {
+        (BitDepth::Eight, BitDepth::Ten) => 2i32,
+        (BitDepth::Ten, BitDepth::Eight) => -2,
+        _ => 0,
+    };
+    if shift > 0 {
+        let s = shift as u32;
+        for p in frame.y.iter_mut().chain(frame.u.iter_mut()).chain(frame.v.iter_mut()) {
+            *p <<= s;
+        }
+    } else if shift < 0 {
+        let s = (-shift) as u32;
+        for p in frame.y.iter_mut().chain(frame.u.iter_mut()).chain(frame.v.iter_mut()) {
+            *p >>= s;
+        }
+    }
+    frame.bit_depth = target;
+    frame
 }
 
 enum OutputFormat {
@@ -401,6 +448,14 @@ fn main() {
                 cr,
             )]
         }
+        #[cfg(feature = "heic")]
+        InputMode::Heic(path) => {
+            let frame = heic::decode_heic(path).unwrap_or_else(|e| {
+                eprintln!("Error reading HEIC {}: {}", path, e);
+                process::exit(1);
+            });
+            vec![frame]
+        }
     };
 
     if frames.is_empty() {
@@ -408,7 +463,14 @@ fn main() {
         process::exit(1);
     }
 
-    if matches!(cli.input, InputMode::Y4m(_)) {
+    let is_file_input = match &cli.input {
+        InputMode::Y4m(_) => true,
+        #[cfg(feature = "heic")]
+        InputMode::Heic(_) => true,
+        _ => false,
+    };
+
+    if is_file_input {
         if !cli.bit_depth_explicit {
             cli.config.video_signal.bit_depth = frames[0].bit_depth;
         }
@@ -416,6 +478,16 @@ fn main() {
             cli.config.video_signal.color_range = frames[0].color_range;
         }
     }
+
+    let target_depth = cli.config.video_signal.bit_depth;
+    let frames: Vec<wav1c::y4m::FramePixels> = if frames[0].bit_depth != target_depth {
+        frames
+            .into_iter()
+            .map(|f| scale_bit_depth(f, target_depth))
+            .collect()
+    } else {
+        frames
+    };
 
     let width = frames[0].width;
     let height = frames[0].height;
@@ -468,7 +540,7 @@ fn main() {
     let output_size = match format {
         OutputFormat::Ivf => {
             let mut output = Vec::new();
-            wav1c::ivf::write_ivf_header(
+            ivf::write_ivf_header(
                 &mut output,
                 width as u16,
                 height as u16,
@@ -476,7 +548,7 @@ fn main() {
             )
             .unwrap();
             for p in &packets {
-                wav1c::ivf::write_ivf_frame(&mut output, p.frame_number, &p.data).unwrap();
+                ivf::write_ivf_frame(&mut output, p.frame_number, &p.data).unwrap();
             }
             file.write_all(&output).unwrap_or_else(|e| {
                 eprintln!("Error writing {}: {}", cli.output_path, e);
@@ -486,15 +558,15 @@ fn main() {
         }
         OutputFormat::Mp4 => {
             let config_obus = encoder.headers();
-            let (fps_num, fps_den) = wav1c::mp4::fps_to_rational(cli.config.fps);
-            let samples: Vec<wav1c::mp4::Mp4Sample> = packets
+            let (fps_num, fps_den) = mp4::fps_to_rational(cli.config.fps);
+            let samples: Vec<mp4::Mp4Sample> = packets
                 .iter()
-                .map(|p| wav1c::mp4::Mp4Sample {
-                    data: wav1c::mp4::strip_temporal_delimiters(&p.data),
+                .map(|p| mp4::Mp4Sample {
+                    data: mp4::strip_temporal_delimiters(&p.data),
                     is_sync: p.frame_type == wav1c::FrameType::Key,
                 })
                 .collect();
-            let mp4_config = wav1c::mp4::Mp4Config {
+            let mp4_config = mp4::Mp4Config {
                 width,
                 height,
                 fps_num,
@@ -503,7 +575,7 @@ fn main() {
                 video_signal: cli.config.video_signal,
             };
             let mut output = Vec::new();
-            wav1c::mp4::write_mp4(&mut output, &mp4_config, &samples).unwrap();
+            mp4::write_mp4(&mut output, &mp4_config, &samples).unwrap();
             file.write_all(&output).unwrap_or_else(|e| {
                 eprintln!("Error writing {}: {}", cli.output_path, e);
                 process::exit(1);
@@ -515,14 +587,14 @@ fn main() {
                 eprintln!("Error: no frames to encode");
                 process::exit(1);
             }
-            let avif_config = wav1c::avif::AvifConfig {
+            let avif_config = avif::AvifConfig {
                 width,
                 height,
                 config_obus: encoder.headers(),
                 video_signal: cli.config.video_signal,
             };
             let mut output = Vec::new();
-            wav1c::avif::write_avif(&mut output, &avif_config, &packets[0].data).unwrap();
+            avif::write_avif(&mut output, &avif_config, &packets[0].data).unwrap();
             file.write_all(&output).unwrap_or_else(|e| {
                 eprintln!("Error writing {}: {}", cli.output_path, e);
                 process::exit(1);

@@ -3,6 +3,46 @@ use std::path::Path;
 use std::process::Command;
 use wav1c::y4m::FramePixels;
 
+fn write_ivf_header(buf: &mut Vec<u8>, width: u16, height: u16, num_frames: u32) {
+    buf.extend_from_slice(b"DKIF");
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&32u16.to_le_bytes());
+    buf.extend_from_slice(b"AV01");
+    buf.extend_from_slice(&width.to_le_bytes());
+    buf.extend_from_slice(&height.to_le_bytes());
+    buf.extend_from_slice(&25u32.to_le_bytes());
+    buf.extend_from_slice(&1u32.to_le_bytes());
+    buf.extend_from_slice(&num_frames.to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes());
+}
+
+fn write_ivf_frame(buf: &mut Vec<u8>, timestamp: u64, data: &[u8]) {
+    buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&timestamp.to_le_bytes());
+    buf.extend_from_slice(data);
+}
+
+fn encode_to_ivf(frames: &[FramePixels], config: &wav1c::EncodeConfig) -> Vec<u8> {
+    let packets = wav1c::encode_packets(frames, config);
+    let width = frames[0].width;
+    let height = frames[0].height;
+    let mut out = Vec::new();
+    write_ivf_header(&mut out, width as u16, height as u16, packets.len() as u32);
+    for p in &packets {
+        write_ivf_frame(&mut out, p.frame_number, &p.data);
+    }
+    out
+}
+
+fn encode_solid_ivf(width: u32, height: u32, y: u8, u: u8, v: u8) -> Vec<u8> {
+    let pixels = FramePixels::solid(width, height, y, u, v);
+    encode_to_ivf(&[pixels], &wav1c::EncodeConfig::default())
+}
+
+fn encode_frame_ivf(pixels: &FramePixels) -> Vec<u8> {
+    encode_to_ivf(std::slice::from_ref(pixels), &wav1c::EncodeConfig::default())
+}
+
 fn dav1d_path() -> Option<std::path::PathBuf> {
     if let Ok(p) = std::env::var("DAV1D") {
         let path = std::path::PathBuf::from(p);
@@ -158,7 +198,7 @@ fn dav1d_decodes_default_gray() {
         return;
     };
 
-    let output = wav1c::encode_av1_ivf(64, 64, 128, 128, 128);
+    let output = encode_solid_ivf(64, 64, 128, 128, 128);
     let ivf_path = std::env::temp_dir().join("wav1c_gray.ivf");
     std::fs::File::create(&ivf_path)
         .unwrap()
@@ -197,7 +237,7 @@ fn dav1d_decodes_all_colors() {
     ];
 
     for &(y, u, v) in test_cases {
-        let output = wav1c::encode_av1_ivf(64, 64, y, u, v);
+        let output = encode_solid_ivf(64, 64, y, u, v);
         let (success, stderr, _) =
             decode_to_y4m(&dav1d, &output, &format!("color_{}_{}_{}", y, u, v));
         assert!(success, "dav1d failed for ({},{},{}): {}", y, u, v, stderr);
@@ -228,7 +268,7 @@ fn decoded_pixels_match_input() {
     ];
 
     for &(y, u, v, max_error) in test_cases {
-        let output = wav1c::encode_av1_ivf(64, 64, y, u, v);
+        let output = encode_solid_ivf(64, 64, y, u, v);
         let (success, stderr, y4m_data) =
             decode_to_y4m(&dav1d, &output, &format!("pixel_{}_{}_{}", y, u, v));
         assert!(success, "dav1d failed for ({},{},{}): {}", y, u, v, stderr);
@@ -306,7 +346,7 @@ fn dav1d_decodes_various_dimensions() {
     ];
 
     for &(w, h) in dimensions {
-        let output = wav1c::encode_av1_ivf(w, h, 128, 128, 128);
+        let output = encode_solid_ivf(w, h, 128, 128, 128);
         let (success, stderr, _) = decode_to_y4m(&dav1d, &output, &format!("dim_{}x{}", w, h));
         assert!(success, "dav1d failed for {}x{}: {}", w, h, stderr);
         assert!(
@@ -334,7 +374,7 @@ fn dav1d_decodes_colors_at_various_dimensions() {
     ];
 
     for &(w, h, y, u, v) in cases {
-        let output = wav1c::encode_av1_ivf(w, h, y, u, v);
+        let output = encode_solid_ivf(w, h, y, u, v);
         let (success, stderr, _) = decode_to_y4m(
             &dav1d,
             &output,
@@ -425,7 +465,7 @@ fn dav1d_decodes_gradient_y4m() {
         (y, u, v)
     });
     let pixels = FramePixels::from_y4m(&y4m_data);
-    let output = wav1c::encode_av1_ivf_y4m(&pixels);
+    let output = encode_frame_ivf(&pixels);
     let (success, stderr, _) = decode_to_y4m(&dav1d, &output, "gradient_y4m");
     assert!(success, "dav1d failed for gradient Y4M: {}", stderr);
     assert!(
@@ -450,8 +490,8 @@ fn dav1d_decodes_solid_y4m() {
 
     for &(y, u, v) in test_cases {
         let pixels = FramePixels::solid(64, 64, y, u, v);
-        let y4m_output = wav1c::encode_av1_ivf_y4m(&pixels);
-        let solid_output = wav1c::encode_av1_ivf(64, 64, y, u, v);
+        let y4m_output = encode_frame_ivf(&pixels);
+        let solid_output = encode_solid_ivf(64, 64, y, u, v);
         assert_eq!(
             y4m_output, solid_output,
             "Y4M and solid API differ for ({},{},{})",
@@ -486,7 +526,7 @@ fn y4m_various_dimensions() {
             (y, u, v)
         });
         let pixels = FramePixels::from_y4m(&y4m_data);
-        let output = wav1c::encode_av1_ivf_y4m(&pixels);
+        let output = encode_frame_ivf(&pixels);
         let (success, stderr, _) = decode_to_y4m(&dav1d, &output, &format!("y4m_dim_{}x{}", w, h));
         assert!(success, "dav1d failed for Y4M {}x{}: {}", w, h, stderr);
         assert!(
@@ -534,7 +574,7 @@ fn recon_matches_dav1d_for_complex_content() {
 
     let ivf_data = {
         let mut out = Vec::new();
-        wav1c::ivf::write_ivf_header(&mut out, 320, 240, 1).unwrap();
+        write_ivf_header(&mut out, 320, 240, 1);
         let mut pkt = Vec::new();
         pkt.extend_from_slice(&wav1c::obu::obu_wrap(
             wav1c::obu::ObuType::TemporalDelimiter,
@@ -548,7 +588,7 @@ fn recon_matches_dav1d_for_complex_content() {
             wav1c::obu::ObuType::Frame,
             &frame_data,
         ));
-        wav1c::ivf::write_ivf_frame(&mut out, 0, &pkt).unwrap();
+        write_ivf_frame(&mut out, 0, &pkt);
         out
     };
 
@@ -625,7 +665,7 @@ fn debug_per_block_drift() {
 
     let ivf_data = {
         let mut out = Vec::new();
-        wav1c::ivf::write_ivf_header(&mut out, w as u16, h as u16, 1).unwrap();
+        write_ivf_header(&mut out, w as u16, h as u16, 1);
         let mut pkt = Vec::new();
         pkt.extend_from_slice(&wav1c::obu::obu_wrap(
             wav1c::obu::ObuType::TemporalDelimiter,
@@ -639,7 +679,7 @@ fn debug_per_block_drift() {
             wav1c::obu::ObuType::Frame,
             &frame_data,
         ));
-        wav1c::ivf::write_ivf_frame(&mut out, 0, &pkt).unwrap();
+        write_ivf_frame(&mut out, 0, &pkt);
         out
     };
 
@@ -699,7 +739,7 @@ fn dav1d_decodes_gradient_multi_sb() {
             (y, 128, 128)
         });
         let pixels = FramePixels::from_y4m(&y4m_data);
-        let output = wav1c::encode_av1_ivf_y4m(&pixels);
+        let output = encode_frame_ivf(&pixels);
         let (success, stderr, _) =
             decode_to_y4m(&dav1d, &output, &format!("gradient_multi_{}x{}", w, h));
         assert!(success, "dav1d failed for gradient {}x{}: {}", w, h, stderr);
@@ -716,7 +756,7 @@ fn dav1d_decodes_multi_frame_solid() {
     let frame_fns: Vec<&dyn Fn(u32, u32) -> (u8, u8, u8)> = vec![&*solid; 5];
     let y4m_data = create_multi_frame_y4m(64, 64, &frame_fns);
     let frames = FramePixels::all_from_y4m(&y4m_data);
-    let output = wav1c::encode_av1_ivf_multi(&frames);
+    let output = encode_to_ivf(&frames, &wav1c::EncodeConfig::default());
     let (success, stderr, _) = decode_to_y4m(&dav1d, &output, "multi_solid");
     assert!(success, "dav1d failed for multi-frame solid: {}", stderr);
     assert!(
@@ -738,13 +778,13 @@ fn dav1d_decodes_multi_frame_varying() {
     let frame_fns: Vec<&dyn Fn(u32, u32) -> (u8, u8, u8)> = vec![&*black, &*white, &*gray];
     let y4m_data = create_multi_frame_y4m(64, 64, &frame_fns);
     let frames = FramePixels::all_from_y4m(&y4m_data);
-    let output = wav1c::encode_av1_ivf_multi(&frames);
+    let output = encode_to_ivf(&frames, &wav1c::EncodeConfig::default());
     let solid_frames = vec![
         FramePixels::solid(64, 64, 0, 128, 128),
         FramePixels::solid(64, 64, 255, 128, 128),
         FramePixels::solid(64, 64, 128, 128, 128),
     ];
-    let solid_output = wav1c::encode_av1_ivf_multi(&solid_frames);
+    let solid_output = encode_to_ivf(&solid_frames, &wav1c::EncodeConfig::default());
     assert_eq!(output, solid_output, "IVF mismatch between y4m and solid");
     let (success, stderr, _) = decode_to_y4m(&dav1d, &output, "multi_varying_v2");
     assert!(success, "dav1d failed for multi-frame varying: {}", stderr);
@@ -784,7 +824,7 @@ fn dav1d_decodes_multi_frame_gradient() {
     let frame_fns: Vec<&dyn Fn(u32, u32) -> (u8, u8, u8)> = vec![&*f0, &*f1, &*f2, &*f3, &*f4];
     let y4m_data = create_multi_frame_y4m(320, 240, &frame_fns);
     let frames = FramePixels::all_from_y4m(&y4m_data);
-    let output = wav1c::encode_av1_ivf_multi(&frames);
+    let output = encode_to_ivf(&frames, &wav1c::EncodeConfig::default());
     let (success, stderr, _) = decode_to_y4m(&dav1d, &output, "multi_gradient");
     assert!(success, "dav1d failed for multi-frame gradient: {}", stderr);
     assert!(
@@ -830,8 +870,8 @@ fn dav1d_decodes_inter_small_residual() {
         }
     }
 
-    let ivf_y4m = wav1c::encode_av1_ivf_multi(&y4m_frames);
-    let ivf_solid = wav1c::encode_av1_ivf_multi(&solid_frames);
+    let ivf_y4m = encode_to_ivf(&y4m_frames, &wav1c::EncodeConfig::default());
+    let ivf_solid = encode_to_ivf(&solid_frames, &wav1c::EncodeConfig::default());
     eprintln!("IVF identical: {}", ivf_y4m == ivf_solid);
 
     for y1 in 128u8..=140 {
@@ -839,7 +879,7 @@ fn dav1d_decodes_inter_small_residual() {
             FramePixels::solid(64, 64, 128, 128, 128),
             FramePixels::solid(64, 64, y1, 128, 128),
         ];
-        let ivf = wav1c::encode_av1_ivf_multi(&frames);
+        let ivf = encode_to_ivf(&frames, &wav1c::EncodeConfig::default());
         let (_, stderr, _) = decode_to_y4m(&dav1d, &ivf, &format!("2f_128_{}", y1));
         let ok = stderr.contains("Decoded 2/2 frames");
         eprintln!("Y={}: {}", y1, if ok { "OK" } else { "FAIL" });
@@ -857,7 +897,7 @@ fn dav1d_decodes_multi_sb_inter() {
             FramePixels::solid(w, h, 128, 128, 128),
             FramePixels::solid(w, h, 200, 100, 150),
         ];
-        let ivf = wav1c::encode_av1_ivf_multi(&frames);
+        let ivf = encode_to_ivf(&frames, &wav1c::EncodeConfig::default());
         let (_, stderr, _) = decode_to_y4m(&dav1d, &ivf, &format!("msb_{}x{}", w, h));
         let ok = stderr.contains("Decoded 2/2 frames");
         eprintln!("{}x{}: {}", w, h, if ok { "OK" } else { "FAIL" });
@@ -888,7 +928,7 @@ fn hdr_cll_emits_metadata_obu() {
         ..Default::default()
     };
 
-    let ivf = wav1c::encode(std::slice::from_ref(&frame), &cfg);
+    let ivf = encode_to_ivf(std::slice::from_ref(&frame), &cfg);
     let obu_types = parse_obu_types_from_first_ivf_frame(&ivf);
     assert!(
         obu_types.contains(&5),
@@ -921,7 +961,7 @@ fn ffprobe_reports_hdr10_signaling_for_10bit_output() {
         ..Default::default()
     };
 
-    let ivf = wav1c::encode(std::slice::from_ref(&frame), &cfg);
+    let ivf = encode_to_ivf(std::slice::from_ref(&frame), &cfg);
     let ivf_path = std::env::temp_dir().join("wav1c_hdr10_probe.ivf");
     std::fs::File::create(&ivf_path)
         .unwrap()

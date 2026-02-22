@@ -279,7 +279,7 @@ impl FramePixels {
             for px in 0..width {
                 let cell_x = px / cell_size;
                 let cell_y = py / cell_size;
-                let is_bright = (cell_x + cell_y) % 2 == 0;
+                let is_bright = (cell_x + cell_y).is_multiple_of(2);
                 let yuv = if is_bright { bright } else { dark };
                 y_plane[(py * width + px) as usize] = yuv[0];
             }
@@ -291,7 +291,7 @@ impl FramePixels {
                 let py = cy * 2;
                 let cell_x = px / cell_size;
                 let cell_y = py / cell_size;
-                let is_bright = (cell_x + cell_y) % 2 == 0;
+                let is_bright = (cell_x + cell_y).is_multiple_of(2);
                 let yuv = if is_bright { bright } else { dark };
                 let idx = (cy * uv_w as u32 + cx) as usize;
                 u_plane[idx] = yuv[1];

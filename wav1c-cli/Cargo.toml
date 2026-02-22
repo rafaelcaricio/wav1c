@@ -13,5 +13,9 @@ categories.workspace = true
 name = "wav1c"
 path = "src/main.rs"
 
+[features]
+heic = ["libheif-rs"]
+
 [dependencies]
 wav1c = { path = "../wav1c", version = "0.2.0" }
+libheif-rs = { version = "2.6", optional = true }

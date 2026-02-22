@@ -8,4 +8,5 @@ av1-spec.md
 *.json
 *.mp4
 *.m4a
+*.avif
 *.heic
