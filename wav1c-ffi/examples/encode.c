@@ -47,6 +47,42 @@ static int write_ivf_frame(FILE *f, uint64_t pts, const uint8_t *data,
     return 0;
 }
 
+static int parse_u32_strict(const char *s, uint32_t *out) {
+    char *end = NULL;
+    unsigned long val = strtoul(s, &end, 10);
+    if (s[0] == '\0' || !end || *end != '\0' || val == 0 || val > 0xFFFFFFFFUL)
+        return -1;
+    *out = (uint32_t)val;
+    return 0;
+}
+
+static int parse_fps_arg(const char *s, uint32_t *num, uint32_t *den) {
+    const char *slash = strchr(s, '/');
+    if (!slash) {
+        uint32_t v;
+        if (parse_u32_strict(s, &v) != 0)
+            return -1;
+        *num = v;
+        *den = 1;
+        return 0;
+    }
+
+    {
+        size_t num_len = (size_t)(slash - s);
+        size_t den_len = strlen(slash + 1);
+        char num_buf[32];
+        char den_buf[32];
+        if (num_len == 0 || den_len == 0 || num_len >= sizeof(num_buf) || den_len >= sizeof(den_buf))
+            return -1;
+        memcpy(num_buf, s, num_len);
+        num_buf[num_len] = '\0';
+        memcpy(den_buf, slash + 1, den_len + 1);
+        if (parse_u32_strict(num_buf, num) != 0 || parse_u32_strict(den_buf, den) != 0)
+            return -1;
+        return 0;
+    }
+}
+
 static void print_usage(const char *prog) {
     fprintf(stderr,
         "Usage: %s <width> <height> <Y> <U> <V> <num_frames> -o <output.ivf> [options]\n"
@@ -57,7 +93,7 @@ static void print_usage(const char *prog) {
         "  -q <0-255>      Quantizer index (default=128)\n"
         "  --keyint <N>    Keyframe interval (default=25)\n"
         "  --bitrate <N>   Target bitrate in bps (0=CQP, default=0)\n"
-        "  --fps <N>       Frames per second (default=25)\n",
+        "  --fps <N|N/D>   Frame rate (default=25/1)\n",
         prog);
 }
 
@@ -87,7 +123,10 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--bitrate") == 0 && i + 1 < argc) {
             cfg.target_bitrate = (uint64_t)atoll(argv[++i]);
         } else if (strcmp(argv[i], "--fps") == 0 && i + 1 < argc) {
-            cfg.fps = atof(argv[++i]);
+            if (parse_fps_arg(argv[++i], &cfg.fps_num, &cfg.fps_den) != 0) {
+                fprintf(stderr, "Error: invalid --fps value (use N or N/D)\n");
+                return 1;
+            }
         }
     }
 
@@ -117,7 +156,7 @@ int main(int argc, char **argv) {
     }
 
     if (write_ivf_header(f, (uint16_t)width, (uint16_t)height,
-                         num_frames, (uint32_t)cfg.fps, 1) != 0) {
+                         num_frames, cfg.fps_num, cfg.fps_den) != 0) {
         fprintf(stderr, "Error: failed to write IVF header\n");
         fclose(f);
         wav1c_encoder_free(enc);

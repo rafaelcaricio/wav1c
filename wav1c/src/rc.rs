@@ -1,3 +1,5 @@
+use crate::fps::Fps;
+
 #[derive(Debug)]
 pub struct RateControl {
     target_bitrate: u64,
@@ -11,8 +13,9 @@ pub struct RateControl {
     keyframe_boost: f64,
 }
 
-fn initial_qp_from_bitrate(target_bitrate: u64, fps: f64, width: u32, height: u32) -> u8 {
-    let bpp = target_bitrate as f64 / (fps * width as f64 * height as f64);
+fn initial_qp_from_bitrate(target_bitrate: u64, fps: Fps, width: u32, height: u32) -> u8 {
+    let fps_f64 = fps.as_f64();
+    let bpp = target_bitrate as f64 / (fps_f64 * width as f64 * height as f64);
     if bpp > 1.0 {
         40
     } else if bpp > 0.5 {
@@ -29,9 +32,9 @@ fn initial_qp_from_bitrate(target_bitrate: u64, fps: f64, width: u32, height: u3
 }
 
 impl RateControl {
-    pub fn new(target_bitrate: u64, fps: f64, width: u32, height: u32, keyint: usize) -> Self {
+    pub fn new(target_bitrate: u64, fps: Fps, width: u32, height: u32, keyint: usize) -> Self {
         let initial_qp = initial_qp_from_bitrate(target_bitrate, fps, width, height);
-        let target_bits_per_frame = target_bitrate as f64 / fps;
+        let target_bits_per_frame = target_bitrate as f64 / fps.as_f64();
         let buffer_size = target_bitrate as f64;
 
         Self {
@@ -129,24 +132,24 @@ mod tests {
 
     #[test]
     fn initial_qp_high_bitrate() {
-        assert!(initial_qp_from_bitrate(10_000_000, 25.0, 320, 240) <= 80);
+        assert!(initial_qp_from_bitrate(10_000_000, Fps::default(), 320, 240) <= 80);
     }
 
     #[test]
     fn initial_qp_low_bitrate() {
-        assert!(initial_qp_from_bitrate(50_000, 25.0, 640, 480) >= 200);
+        assert!(initial_qp_from_bitrate(50_000, Fps::default(), 640, 480) >= 200);
     }
 
     #[test]
     fn first_frame_uses_initial_qp() {
-        let mut rc = RateControl::new(500_000, 25.0, 320, 240, 25);
+        let mut rc = RateControl::new(500_000, Fps::default(), 320, 240, 25);
         let qp = rc.compute_qp(true);
         assert!(qp > 0 && qp < 255);
     }
 
     #[test]
     fn qp_increases_when_over_budget() {
-        let mut rc = RateControl::new(500_000, 25.0, 320, 240, 25);
+        let mut rc = RateControl::new(500_000, Fps::default(), 320, 240, 25);
         let initial_qp = rc.compute_qp(true);
         rc.update(100_000, initial_qp);
 
@@ -161,7 +164,7 @@ mod tests {
 
     #[test]
     fn qp_decreases_when_under_budget() {
-        let mut rc = RateControl::new(500_000, 25.0, 320, 240, 25);
+        let mut rc = RateControl::new(500_000, Fps::default(), 320, 240, 25);
         let initial_qp = rc.compute_qp(true);
         rc.update(1000, initial_qp);
 
@@ -175,7 +178,7 @@ mod tests {
 
     #[test]
     fn keyframe_gets_lower_qp() {
-        let mut rc = RateControl::new(500_000, 25.0, 320, 240, 25);
+        let mut rc = RateControl::new(500_000, Fps::default(), 320, 240, 25);
         rc.compute_qp(true);
         rc.update(20_000, 120);
 
@@ -188,7 +191,7 @@ mod tests {
 
     #[test]
     fn buffer_stays_in_range() {
-        let mut rc = RateControl::new(500_000, 25.0, 320, 240, 25);
+        let mut rc = RateControl::new(500_000, Fps::default(), 320, 240, 25);
         for i in 0..100 {
             let is_key = i % 25 == 0;
             let qp = rc.compute_qp(is_key);

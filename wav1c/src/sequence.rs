@@ -1,4 +1,5 @@
 use crate::bitwriter::BitWriter;
+use crate::fps::Fps;
 use crate::video::{BitDepth, ColorRange, VideoSignal};
 
 pub const SEQ_LEVEL_IDX_5_1: u8 = 13;
@@ -81,22 +82,19 @@ fn bits_needed(v: u32) -> u8 {
     }
 }
 
-pub fn derive_sequence_level_idx(width: u32, height: u32, fps: f64) -> u8 {
+pub fn derive_sequence_level_idx(width: u32, height: u32, fps: Fps) -> u8 {
     let pic_size = width as u64 * height as u64;
-    let fps = if fps.is_finite() && fps > 0.0 {
-        fps
-    } else {
-        1.0
-    };
-    let display_rate = pic_size as f64 * fps;
-    let decode_rate = display_rate;
+    let display_rate_num = pic_size as u128 * fps.num as u128;
+    let display_rate_den = fps.den as u128;
 
     for level in LEVEL_CONSTRAINTS {
+        let max_display_rate = level.max_display_rate as u128;
+        let max_decode_rate = level.max_decode_rate as u128;
         if width <= level.max_h_size
             && height <= level.max_v_size
             && pic_size <= level.max_pic_size
-            && display_rate <= level.max_display_rate as f64
-            && decode_rate <= level.max_decode_rate as f64
+            && display_rate_num <= max_display_rate * display_rate_den
+            && display_rate_num <= max_decode_rate * display_rate_den
         {
             return level.seq_level_idx.max(SEQ_LEVEL_IDX_5_1);
         }
@@ -106,7 +104,7 @@ pub fn derive_sequence_level_idx(width: u32, height: u32, fps: f64) -> u8 {
 }
 
 pub fn encode_sequence_header(width: u32, height: u32, signal: &VideoSignal) -> Vec<u8> {
-    let seq_level_idx = derive_sequence_level_idx(width, height, 25.0);
+    let seq_level_idx = derive_sequence_level_idx(width, height, Fps::default());
     encode_sequence_header_with_level(width, height, signal, seq_level_idx)
 }
 
@@ -323,19 +321,19 @@ mod tests {
 
     #[test]
     fn derive_level_small_frames_floor_to_5_1() {
-        let level = derive_sequence_level_idx(320, 240, 25.0);
+        let level = derive_sequence_level_idx(320, 240, Fps::default());
         assert_eq!(level, SEQ_LEVEL_IDX_5_1);
     }
 
     #[test]
     fn derive_level_large_frame_selects_higher_level() {
-        let level = derive_sequence_level_idx(4284, 5712, 25.0);
+        let level = derive_sequence_level_idx(4284, 5712, Fps::default());
         assert!(level > SEQ_LEVEL_IDX_5_1);
     }
 
     #[test]
     fn derive_level_out_of_table_falls_back_to_max_parameters() {
-        let level = derive_sequence_level_idx(20_000, 20_000, 30.0);
+        let level = derive_sequence_level_idx(20_000, 20_000, Fps::from_int(30).unwrap());
         assert_eq!(level, SEQ_LEVEL_IDX_MAX_PARAMETERS);
     }
 }

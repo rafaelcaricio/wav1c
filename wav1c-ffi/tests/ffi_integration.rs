@@ -282,6 +282,16 @@ fn invalid_color_range_returns_null() {
 }
 
 #[test]
+fn zero_fps_denominator_returns_null() {
+    let mut cfg = default_config();
+    cfg.fps_den = 0;
+
+    let enc = unsafe { wav1c_encoder_new(64, 64, &cfg) };
+    assert!(enc.is_null());
+    assert!(last_error_message().contains("fps den must be > 0"));
+}
+
+#[test]
 fn short_plane_lengths_are_rejected() {
     let cfg = default_config();
     let enc = unsafe { wav1c_encoder_new(64, 64, &cfg) };

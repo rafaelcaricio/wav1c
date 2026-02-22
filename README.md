@@ -130,13 +130,13 @@ assert!(!packets[0].data.is_empty());
 ```rust
 use std::path::Path;
 use wav1c::y4m::FramePixels;
-use wav1c::{encode_packets, EncodeConfig};
+use wav1c::{encode_packets, EncodeConfig, Fps};
 
 let frames = FramePixels::all_from_y4m_file(Path::new("input.y4m"))?;
 let config = EncodeConfig {
     base_q_idx: 110,
     keyint: 60,
-    fps: 30.0,
+    fps: Fps::from_int(30).unwrap(),
     b_frames: true,
     gop_size: 4,
     ..EncodeConfig::default()
@@ -152,7 +152,7 @@ assert!(!packets.is_empty());
 ```rust
 use wav1c::y4m::FramePixels;
 use wav1c::{
-    encode_packets, BitDepth, ColorRange, ContentLightLevel, EncodeConfig,
+    encode_packets, BitDepth, ColorRange, ContentLightLevel, EncodeConfig, Fps,
     MasteringDisplayMetadata, VideoSignal,
 };
 
@@ -168,7 +168,7 @@ let frame = FramePixels::solid_with_bit_depth(
 
 let config = EncodeConfig {
     keyint: 60,
-    fps: 30.0,
+    fps: Fps::from_int(30).unwrap(),
     b_frames: true,
     gop_size: 4,
     video_signal: VideoSignal::hdr10(ColorRange::Full),
@@ -195,6 +195,7 @@ Exported from the crate root:
 - `BitDepth`
 - `ColorRange`
 - `ColorDescription`
+- `Fps`
 - `VideoSignal`
 - `ContentLightLevel`
 - `MasteringDisplayMetadata`
@@ -212,6 +213,7 @@ Canonical API:
 - `wav1c_last_error_message()`
 
 `Wav1cConfig` fields:
+- `fps_num`, `fps_den`: frame rate rational (`num/den`)
 - `bit_depth`: `8` or `10`
 - `color_range`: `0` limited, `1` full
 - `color_primaries`, `transfer_characteristics`, `matrix_coefficients`: set to `-1` to omit color description
@@ -227,7 +229,8 @@ Simple 8-bit SDR usage:
 Wav1cConfig cfg = wav1c_default_config();
 cfg.base_q_idx = 128;
 cfg.keyint = 60;
-cfg.fps = 30.0;
+cfg.fps_num = 30;
+cfg.fps_den = 1;
 cfg.b_frames = 1;
 cfg.gop_size = 4;
 
@@ -284,7 +287,8 @@ wav1c_encoder_free(enc);
 
 Wav1cConfig cfg = wav1c_default_config();
 cfg.keyint = 60;
-cfg.fps = 30.0;
+cfg.fps_num = 30;
+cfg.fps_den = 1;
 cfg.b_frames = 1;
 cfg.gop_size = 4;
 cfg.bit_depth = 10;
@@ -326,7 +330,7 @@ Build artifacts:
 Main entry point: `WasmEncoder`
 
 Constructor:
-- `new(width, height, base_q_idx, keyint, b_frames, gop_size, fps, target_bitrate, bit_depth, color_range, cp, tc, mc, has_cll, max_cll, max_fall)`
+- `new(width, height, base_q_idx, keyint, b_frames, gop_size, fps_num, fps_den, target_bitrate, bit_depth, color_range, cp, tc, mc, has_cll, max_cll, max_fall)`
 
 10-bit/HDR methods:
 - `encode_frame_10bit(y, u, v)`

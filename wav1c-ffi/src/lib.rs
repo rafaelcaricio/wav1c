@@ -5,6 +5,7 @@ use std::ffi::c_char;
 use std::ptr;
 
 use wav1c::EncoderConfig;
+use wav1c::Fps;
 use wav1c::packet::FrameType;
 use wav1c::rc::RateControlStats;
 use wav1c::video::{
@@ -58,7 +59,8 @@ pub struct Wav1cConfig {
     pub base_q_idx: u8,
     pub keyint: usize,
     pub target_bitrate: u64,
-    pub fps: f64,
+    pub fps_num: u32,
+    pub fps_den: u32,
     pub b_frames: i32,
     pub gop_size: usize,
     pub bit_depth: u8,
@@ -203,6 +205,7 @@ fn build_encoder_config(cfg: &Wav1cConfig) -> Result<EncoderConfig, String> {
     let color_description = parse_color_description(cfg)?;
     let content_light = parse_content_light(cfg)?;
     let mastering_display = parse_mastering_display(cfg)?;
+    let fps = Fps::new(cfg.fps_num, cfg.fps_den).map_err(|e| e.to_string())?;
 
     Ok(EncoderConfig {
         base_q_idx: cfg.base_q_idx,
@@ -212,7 +215,7 @@ fn build_encoder_config(cfg: &Wav1cConfig) -> Result<EncoderConfig, String> {
         } else {
             Some(cfg.target_bitrate)
         },
-        fps: cfg.fps,
+        fps,
         b_frames: cfg.b_frames != 0,
         gop_size: if cfg.gop_size > 0 { cfg.gop_size } else { 3 },
         video_signal: VideoSignal {
@@ -330,7 +333,8 @@ pub extern "C" fn wav1c_default_config() -> Wav1cConfig {
         base_q_idx: 128,
         keyint: 25,
         target_bitrate: 0,
-        fps: 25.0,
+        fps_num: 25,
+        fps_den: 1,
         b_frames: 0,
         gop_size: 3,
         bit_depth: 8,

@@ -1,3 +1,4 @@
+use crate::fps::Fps;
 use crate::video::{BitDepth, ColorRange};
 
 #[derive(Debug, Clone)]
@@ -63,6 +64,66 @@ fn parse_bit_depth_from_colorspace(colorspace: &str) -> Result<BitDepth, Y4mErro
     }
 }
 
+fn parse_fps_token(value: &str) -> Result<Fps, Y4mError> {
+    let (num_s, den_s) = value
+        .split_once(':')
+        .ok_or(Y4mError::InvalidHeader("Invalid frame rate"))?;
+    let num = num_s
+        .parse::<u32>()
+        .map_err(|_| Y4mError::InvalidHeader("Invalid frame rate"))?;
+    let den = den_s
+        .parse::<u32>()
+        .map_err(|_| Y4mError::InvalidHeader("Invalid frame rate"))?;
+    Fps::new(num, den).map_err(|_| Y4mError::InvalidHeader("Invalid frame rate"))
+}
+
+fn parse_main_header(
+    line: &str,
+) -> Result<(u32, u32, BitDepth, ColorRange, Option<Fps>), Y4mError> {
+    if !line.starts_with("YUV4MPEG2") {
+        return Err(Y4mError::InvalidHeader("Not a YUV4MPEG2 file"));
+    }
+
+    let mut width = 0u32;
+    let mut height = 0u32;
+    let mut bit_depth = BitDepth::Eight;
+    let mut default_color_range = ColorRange::Limited;
+    let mut fps = None;
+
+    for token in line.split_whitespace().skip(1) {
+        let (key, val) = token.split_at(1);
+        match key {
+            "W" => {
+                width = val
+                    .parse()
+                    .map_err(|_| Y4mError::InvalidHeader("Invalid width"))?;
+            }
+            "H" => {
+                height = val
+                    .parse()
+                    .map_err(|_| Y4mError::InvalidHeader("Invalid height"))?;
+            }
+            "C" => {
+                bit_depth = parse_bit_depth_from_colorspace(val)?;
+            }
+            "F" => {
+                fps = Some(parse_fps_token(val)?);
+            }
+            _ => {
+                if let Some(r) = parse_color_range_token(token) {
+                    default_color_range = r;
+                }
+            }
+        }
+    }
+
+    if width == 0 || height == 0 {
+        return Err(Y4mError::InvalidDimensions);
+    }
+
+    Ok((width, height, bit_depth, default_color_range, fps))
+}
+
 fn parse_frame_header_line(
     line: &[u8],
     default_color_range: ColorRange,
@@ -81,50 +142,14 @@ fn parse_frame_header_line(
 }
 
 impl FramePixels {
-    pub fn try_all_from_y4m(data: &[u8]) -> Result<Vec<Self>, Y4mError> {
+    fn try_all_from_y4m_impl(data: &[u8]) -> Result<(Vec<Self>, Option<Fps>), Y4mError> {
         let header_end = data
             .iter()
             .position(|&b| b == b'\n')
             .ok_or(Y4mError::MissingHeader)?;
         let header_line =
             std::str::from_utf8(&data[..header_end]).map_err(|_| Y4mError::InvalidHeaderUtf8)?;
-
-        if !header_line.starts_with("YUV4MPEG2") {
-            return Err(Y4mError::InvalidHeader("Not a YUV4MPEG2 file"));
-        }
-
-        let mut width = 0u32;
-        let mut height = 0u32;
-        let mut bit_depth = BitDepth::Eight;
-        let mut default_color_range = ColorRange::Limited;
-
-        for token in header_line.split_whitespace().skip(1) {
-            let (key, val) = token.split_at(1);
-            match key {
-                "W" => {
-                    width = val
-                        .parse()
-                        .map_err(|_| Y4mError::InvalidHeader("Invalid width"))?;
-                }
-                "H" => {
-                    height = val
-                        .parse()
-                        .map_err(|_| Y4mError::InvalidHeader("Invalid height"))?;
-                }
-                "C" => {
-                    bit_depth = parse_bit_depth_from_colorspace(val)?;
-                }
-                _ => {
-                    if let Some(r) = parse_color_range_token(token) {
-                        default_color_range = r;
-                    }
-                }
-            }
-        }
-
-        if width == 0 || height == 0 {
-            return Err(Y4mError::InvalidDimensions);
-        }
+        let (width, height, bit_depth, default_color_range, fps) = parse_main_header(header_line)?;
 
         let y_size = (width * height) as usize;
         let uv_w = width.div_ceil(2) as usize;
@@ -198,7 +223,15 @@ impl FramePixels {
             return Err(Y4mError::NoFrameMarker);
         }
 
-        Ok(frames)
+        Ok((frames, fps))
+    }
+
+    pub fn try_all_from_y4m(data: &[u8]) -> Result<Vec<Self>, Y4mError> {
+        Self::try_all_from_y4m_impl(data).map(|(frames, _)| frames)
+    }
+
+    pub fn try_all_from_y4m_with_fps(data: &[u8]) -> Result<(Vec<Self>, Option<Fps>), Y4mError> {
+        Self::try_all_from_y4m_impl(data)
     }
 
     pub fn all_from_y4m(data: &[u8]) -> Vec<Self> {
@@ -208,6 +241,14 @@ impl FramePixels {
     pub fn all_from_y4m_file(path: &std::path::Path) -> std::io::Result<Vec<Self>> {
         let data = std::fs::read(path)?;
         Self::try_all_from_y4m(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    pub fn all_from_y4m_file_with_fps(
+        path: &std::path::Path,
+    ) -> std::io::Result<(Vec<Self>, Option<Fps>)> {
+        let data = std::fs::read(path)?;
+        Self::try_all_from_y4m_with_fps(&data)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
@@ -340,6 +381,31 @@ mod tests {
         assert_eq!(pixels.v.len(), 32 * 32);
         assert!(pixels.y.iter().all(|&p| p == 128));
         assert_eq!(pixels.bit_depth, BitDepth::Eight);
+    }
+
+    #[test]
+    fn parses_header_fps() {
+        let y4m = create_test_y4m(64, 64, 128, 128, 128);
+        let (_, fps) = FramePixels::try_all_from_y4m_with_fps(&y4m).expect("y4m parse");
+        assert_eq!(fps, Some(Fps::from_int(30).unwrap()));
+    }
+
+    #[test]
+    fn parses_fractional_header_fps() {
+        let header = b"YUV4MPEG2 W2 H2 F30000:1001 Ip C420jpeg\n";
+        let mut data = header.to_vec();
+        data.extend_from_slice(b"FRAME\n");
+        data.extend_from_slice(&[128u8; 4]);
+        data.extend_from_slice(&[128u8; 1]);
+        data.extend_from_slice(&[128u8; 1]);
+        let (_, fps) = FramePixels::try_all_from_y4m_with_fps(&data).expect("y4m parse");
+        assert_eq!(
+            fps,
+            Some(Fps {
+                num: 30_000,
+                den: 1_001
+            })
+        );
     }
 
     #[test]

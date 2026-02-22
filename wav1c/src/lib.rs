@@ -7,6 +7,7 @@ pub mod cdf_coef;
 pub mod dequant;
 pub mod encoder;
 pub mod error;
+pub mod fps;
 pub mod frame;
 pub mod metadata;
 pub mod msac;
@@ -22,6 +23,7 @@ pub mod y4m;
 
 pub use encoder::{Encoder, EncoderConfig};
 pub use error::EncoderError;
+pub use fps::{Fps, FpsError};
 pub use packet::{FrameType, Packet};
 pub use video::{
     BitDepth, ColorDescription, ColorRange, ContentLightLevel, MasteringDisplayMetadata,
@@ -36,7 +38,7 @@ pub struct EncodeConfig {
     pub base_q_idx: u8,
     pub keyint: usize,
     pub target_bitrate: Option<u64>,
-    pub fps: f64,
+    pub fps: Fps,
     pub b_frames: bool,
     pub gop_size: usize,
     pub video_signal: VideoSignal,
@@ -50,7 +52,7 @@ impl Default for EncodeConfig {
             base_q_idx: DEFAULT_BASE_Q_IDX,
             keyint: DEFAULT_KEYINT,
             target_bitrate: None,
-            fps: 25.0,
+            fps: Fps::default(),
             b_frames: false,
             gop_size: 3,
             video_signal: VideoSignal::default(),

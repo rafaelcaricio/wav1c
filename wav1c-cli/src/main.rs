@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process;
 
 use wav1c::{
-    BitDepth, ColorDescription, ColorRange, ContentLightLevel, EncodeConfig, EncoderConfig,
+    BitDepth, ColorDescription, ColorRange, ContentLightLevel, EncodeConfig, EncoderConfig, Fps,
     MasteringDisplayMetadata, VideoSignal,
 };
 
@@ -22,6 +22,7 @@ struct CliArgs {
     input: InputMode,
     output_path: String,
     config: EncodeConfig,
+    fps_explicit: bool,
     bit_depth_explicit: bool,
     color_range_explicit: bool,
     #[cfg(feature = "heic")]
@@ -72,6 +73,29 @@ fn parse_bit_depth(s: &str) -> Result<BitDepth, String> {
     BitDepth::from_u8(v).ok_or_else(|| format!("unsupported bit depth: {v}"))
 }
 
+fn parse_fps(s: &str) -> Result<Fps, String> {
+    if s.contains('.') {
+        return Err(format!(
+            "invalid --fps value: {s} (use INT or NUM/DEN, e.g. 30 or 30000/1001)"
+        ));
+    }
+
+    if let Some((num_s, den_s)) = s.split_once('/') {
+        let num = num_s
+            .parse::<u32>()
+            .map_err(|_| format!("invalid --fps numerator: {num_s}"))?;
+        let den = den_s
+            .parse::<u32>()
+            .map_err(|_| format!("invalid --fps denominator: {den_s}"))?;
+        return Fps::new(num, den).map_err(|e| format!("invalid --fps value: {e}"));
+    }
+
+    let fps = s
+        .parse::<u32>()
+        .map_err(|_| format!("invalid --fps value: {s} (use INT or NUM/DEN)"))?;
+    Fps::from_int(fps).map_err(|e| format!("invalid --fps value: {e}"))
+}
+
 fn parse_mdcv(s: &str) -> Result<MasteringDisplayMetadata, String> {
     let values: Vec<&str> = s.split(',').collect();
     if values.len() != 10 {
@@ -102,6 +126,7 @@ fn parse_cli() -> CliArgs {
     let mut output_path: Option<String> = None;
 
     let mut config = EncodeConfig::default();
+    let mut fps_explicit = false;
     let mut bit_depth_explicit = false;
     let mut color_range_explicit = false;
     let mut hdr10 = false;
@@ -140,6 +165,14 @@ fn parse_cli() -> CliArgs {
                     eprintln!("Error: {e}");
                     process::exit(1);
                 }));
+            }
+            "--fps" => {
+                let value = args.next().unwrap_or_default();
+                config.fps = parse_fps(&value).unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+                fps_explicit = true;
             }
             "--bit-depth" => {
                 let value = args.next().unwrap_or_default();
@@ -330,6 +363,7 @@ fn parse_cli() -> CliArgs {
         input,
         output_path,
         config,
+        fps_explicit,
         bit_depth_explicit,
         color_range_explicit,
         #[cfg(feature = "heic")]
@@ -347,6 +381,7 @@ fn print_usage() {
     eprintln!("  -q <0-255>              Quantizer index (default=128)");
     eprintln!("  --keyint <N>            Keyframe interval (default=25)");
     eprintln!("  --bitrate <N>           Target bitrate (e.g. 500k, 2M)");
+    eprintln!("  --fps <INT|NUM/DEN>     Frame rate (e.g. 30 or 30000/1001)");
     eprintln!("  --bit-depth <8|10>      Signal bit depth");
     eprintln!("  --hdr10                 Apply HDR10 defaults (BT.2020/PQ/BT.2020NC)");
     eprintln!("  --color-range <limited|full>");
@@ -451,12 +486,18 @@ fn main() {
     #[cfg(feature = "heic")]
     let mut heic_source_nclx: Option<heic::SourceNclx> = None;
 
+    let mut source_fps: Option<Fps> = None;
     let frames = match &cli.input {
-        InputMode::Y4m(path) => wav1c::y4m::FramePixels::all_from_y4m_file(Path::new(path))
-            .unwrap_or_else(|e| {
-                eprintln!("Error reading {}: {}", path, e);
-                process::exit(1);
-            }),
+        InputMode::Y4m(path) => {
+            let (frames, fps) =
+                wav1c::y4m::FramePixels::all_from_y4m_file_with_fps(Path::new(path))
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error reading {}: {}", path, e);
+                        process::exit(1);
+                    });
+            source_fps = fps;
+            frames
+        }
         InputMode::Solid {
             width,
             height,
@@ -536,6 +577,12 @@ fn main() {
         }
         if !cli.color_range_explicit {
             cli.config.video_signal.color_range = frames[0].color_range;
+        }
+        if !cli.fps_explicit
+            && matches!(&cli.input, InputMode::Y4m(_))
+            && let Some(fps) = source_fps
+        {
+            cli.config.fps = fps;
         }
     }
 
@@ -650,7 +697,15 @@ fn main() {
     let output_size = match format {
         OutputFormat::Ivf => {
             let mut output = Vec::new();
-            ivf::write_ivf_header(&mut output, width, height, packets.len() as u32).unwrap();
+            ivf::write_ivf_header(
+                &mut output,
+                width,
+                height,
+                packets.len() as u32,
+                cli.config.fps.num,
+                cli.config.fps.den,
+            )
+            .unwrap();
             for p in &packets {
                 ivf::write_ivf_frame(&mut output, p.frame_number, &p.data).unwrap();
             }
@@ -662,7 +717,6 @@ fn main() {
         }
         OutputFormat::Mp4 => {
             let config_obus = encoder.headers();
-            let (fps_num, fps_den) = mp4::fps_to_rational(cli.config.fps);
             let samples: Vec<mp4::Mp4Sample> = packets
                 .iter()
                 .map(|p| mp4::Mp4Sample {
@@ -673,8 +727,8 @@ fn main() {
             let mp4_config = mp4::Mp4Config {
                 width,
                 height,
-                fps_num,
-                fps_den,
+                fps_num: cli.config.fps.num,
+                fps_den: cli.config.fps.den,
                 config_obus,
                 video_signal: cli.config.video_signal,
             };
@@ -860,6 +914,30 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_fps_accepts_integer() {
+        let fps = parse_fps("30").expect("expected integer fps to parse");
+        assert_eq!(fps, Fps { num: 30, den: 1 });
+    }
+
+    #[test]
+    fn parse_fps_accepts_num_den() {
+        let fps = parse_fps("30000/1001").expect("expected fraction fps to parse");
+        assert_eq!(
+            fps,
+            Fps {
+                num: 30_000,
+                den: 1_001
+            }
+        );
+    }
+
+    #[test]
+    fn parse_fps_rejects_decimal() {
+        let err = parse_fps("29.97").expect_err("expected decimal fps to fail");
+        assert!(err.contains("use INT or NUM/DEN"));
+    }
 
     #[test]
     fn hdr10_on_8bit_input_is_rejected() {

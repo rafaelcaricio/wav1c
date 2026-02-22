@@ -5,6 +5,8 @@ pub fn write_ivf_header<W: Write>(
     width: u32,
     height: u32,
     num_frames: u32,
+    fps_num: u32,
+    fps_den: u32,
 ) -> io::Result<()> {
     let width_u16 = u16::try_from(width).map_err(|_| {
         io::Error::new(
@@ -33,8 +35,8 @@ pub fn write_ivf_header<W: Write>(
     writer.write_all(b"AV01")?;
     writer.write_all(&width_u16.to_le_bytes())?;
     writer.write_all(&height_u16.to_le_bytes())?;
-    writer.write_all(&25u32.to_le_bytes())?;
-    writer.write_all(&1u32.to_le_bytes())?;
+    writer.write_all(&fps_num.to_le_bytes())?;
+    writer.write_all(&fps_den.to_le_bytes())?;
     writer.write_all(&num_frames.to_le_bytes())?;
     writer.write_all(&0u32.to_le_bytes())?;
     Ok(())
@@ -58,14 +60,30 @@ mod tests {
     #[test]
     fn rejects_width_above_u16_limit() {
         let mut out = Vec::new();
-        let err = write_ivf_header(&mut out, 70_000, 1_000, 1).expect_err("expected rejection");
+        let err =
+            write_ivf_header(&mut out, 70_000, 1_000, 1, 25, 1).expect_err("expected rejection");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
     fn rejects_height_above_u16_limit() {
         let mut out = Vec::new();
-        let err = write_ivf_header(&mut out, 1_000, 70_000, 1).expect_err("expected rejection");
+        let err =
+            write_ivf_header(&mut out, 1_000, 70_000, 1, 25, 1).expect_err("expected rejection");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn writes_configured_fps_num_den() {
+        let mut out = Vec::new();
+        write_ivf_header(&mut out, 64, 64, 1, 30_000, 1_001).expect("header should write");
+        assert_eq!(
+            u32::from_le_bytes([out[16], out[17], out[18], out[19]]),
+            30_000
+        );
+        assert_eq!(
+            u32::from_le_bytes([out[20], out[21], out[22], out[23]]),
+            1_001
+        );
     }
 }

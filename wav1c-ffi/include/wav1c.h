@@ -27,7 +27,8 @@ typedef struct {
     uint8_t  base_q_idx;
     size_t   keyint;
     uint64_t target_bitrate;
-    double   fps;
+    uint32_t fps_num;
+    uint32_t fps_den;
     int32_t  b_frames;
     size_t   gop_size;
     uint8_t  bit_depth; /* 8 or 10 */

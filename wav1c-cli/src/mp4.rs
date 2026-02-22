@@ -24,24 +24,6 @@ pub fn strip_temporal_delimiters(data: &[u8]) -> Vec<u8> {
     }
 }
 
-pub fn fps_to_rational(fps: f64) -> (u32, u32) {
-    let drop_frame = [
-        (24000u32, 1001u32, 23.976),
-        (30000, 1001, 29.97),
-        (60000, 1001, 59.94),
-    ];
-    for (num, den, approx) in &drop_frame {
-        if (fps - approx).abs() < 0.01 {
-            return (*num, *den);
-        }
-    }
-    let rounded = fps.round() as u32;
-    if (fps - rounded as f64).abs() < 0.001 {
-        return (rounded, 1);
-    }
-    ((fps * 1000.0).round() as u32, 1000)
-}
-
 pub fn write_mp4<W: Write>(w: &mut W, config: &Mp4Config, samples: &[Mp4Sample]) -> io::Result<()> {
     validate_mp4_dimensions(config.width, config.height)?;
 
@@ -451,5 +433,21 @@ mod tests {
         let mut out = Vec::new();
         let err = write_mp4(&mut out, &cfg, &[]).expect_err("expected rejection");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn mdhd_uses_exact_fps_num_as_timescale() {
+        let mdhd = build_mdhd(30_000, 1_001);
+        let timescale = u32::from_be_bytes([mdhd[20], mdhd[21], mdhd[22], mdhd[23]]);
+        let duration = u32::from_be_bytes([mdhd[24], mdhd[25], mdhd[26], mdhd[27]]);
+        assert_eq!(timescale, 30_000);
+        assert_eq!(duration, 1_001);
+    }
+
+    #[test]
+    fn stts_uses_exact_fps_den_as_sample_delta() {
+        let stts = build_stts(3, 1_001);
+        let sample_delta = u32::from_be_bytes([stts[20], stts[21], stts[22], stts[23]]);
+        assert_eq!(sample_delta, 1_001);
     }
 }

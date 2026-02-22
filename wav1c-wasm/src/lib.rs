@@ -4,7 +4,7 @@ use wasm_bindgen::prelude::*;
 use wav1c::packet::FrameType;
 use wav1c::y4m::FramePixels;
 use wav1c::{
-    BitDepth, ColorDescription, ColorRange, ContentLightLevel, EncoderConfig,
+    BitDepth, ColorDescription, ColorRange, ContentLightLevel, EncoderConfig, Fps,
     MasteringDisplayMetadata, VideoSignal,
 };
 
@@ -56,6 +56,7 @@ impl WasmEncoder {
     /// Canonical constructor.
     ///
     /// - `target_bitrate`: bits/s (`0` disables rate control)
+    /// - `fps_num/fps_den`: frame rate rational (`num/den`)
     /// - `color_range`: `0` limited, `1` full
     /// - `color_primaries/transfer/matrix`: set all three to `-1` to omit color description
     /// - `has_cll`: when false, `max_cll/max_fall` must both be zero
@@ -68,7 +69,8 @@ impl WasmEncoder {
         keyint: usize,
         b_frames: bool,
         gop_size: usize,
-        fps: f64,
+        fps_num: u32,
+        fps_den: u32,
         target_bitrate: u64,
         bit_depth: u8,
         color_range: u8,
@@ -85,6 +87,7 @@ impl WasmEncoder {
             color_description: parse_color_description(color_primaries, transfer, matrix)?,
         };
         let content_light = parse_content_light(has_cll, max_cll, max_fall)?;
+        let fps = Fps::new(fps_num, fps_den).map_err(|e| JsError::new(&e.to_string()))?;
 
         let config = EncoderConfig {
             base_q_idx,

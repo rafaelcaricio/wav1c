@@ -2,8 +2,8 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use wav1c::EncodeConfig;
 use wav1c::y4m::FramePixels;
+use wav1c::{EncodeConfig, Fps};
 
 fn print_usage() {
     eprintln!("Usage: encode_y4m <input.y4m> <output.ivf> [options]");
@@ -14,7 +14,18 @@ fn print_usage() {
     eprintln!("  --b-frames       Enable B-frame encoding (experimental)");
     eprintln!("  --gop-size N     Mini-GOP size for B-frames (default: 3)");
     eprintln!("  --bitrate N      Target bitrate in kbps (enables rate control)");
-    eprintln!("  --fps N          Frames per second (default: 25)");
+    eprintln!("  --fps N[/D]      Frame rate (default: 25/1)");
+}
+
+fn parse_fps(value: &str) -> Fps {
+    if let Some((num_s, den_s)) = value.split_once('/') {
+        let num = num_s.parse().expect("invalid fps numerator");
+        let den = den_s.parse().expect("invalid fps denominator");
+        Fps::new(num, den).expect("fps num/den must be > 0")
+    } else {
+        let fps = value.parse().expect("invalid fps value");
+        Fps::from_int(fps).expect("fps must be > 0")
+    }
 }
 
 fn write_ivf(frames: &[FramePixels], config: &EncodeConfig) -> Vec<u8> {
@@ -28,9 +39,10 @@ fn write_ivf(frames: &[FramePixels], config: &EncodeConfig) -> Vec<u8> {
     out.write_all(b"AV01").unwrap();
     out.write_all(&width.to_le_bytes()).unwrap();
     out.write_all(&height.to_le_bytes()).unwrap();
-    out.write_all(&25u32.to_le_bytes()).unwrap();
-    out.write_all(&1u32.to_le_bytes()).unwrap();
-    out.write_all(&(packets.len() as u32).to_le_bytes()).unwrap();
+    out.write_all(&config.fps.num.to_le_bytes()).unwrap();
+    out.write_all(&config.fps.den.to_le_bytes()).unwrap();
+    out.write_all(&(packets.len() as u32).to_le_bytes())
+        .unwrap();
     out.write_all(&0u32.to_le_bytes()).unwrap();
     for p in &packets {
         out.write_all(&(p.data.len() as u32).to_le_bytes()).unwrap();
@@ -76,7 +88,7 @@ fn main() {
             }
             "--fps" => {
                 i += 1;
-                config.fps = args[i].parse().expect("invalid fps value");
+                config.fps = parse_fps(&args[i]);
             }
             other => {
                 eprintln!("Unknown option: {}", other);
