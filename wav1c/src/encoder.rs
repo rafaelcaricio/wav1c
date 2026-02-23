@@ -120,13 +120,30 @@ impl Encoder {
     }
 
     pub fn headers(&self) -> Vec<u8> {
-        let seq = sequence::encode_sequence_header_with_level(
-            self.width,
-            self.height,
-            &self.config.video_signal,
-            self.sequence_level_idx,
-        );
-        let mut out = obu::obu_wrap(obu::ObuType::SequenceHeader, &seq);
+        self.headers_with_mode(false)
+    }
+
+    pub fn headers_still_picture(&self) -> Vec<u8> {
+        self.headers_with_mode(true)
+    }
+
+    fn headers_with_mode(&self, still_picture: bool) -> Vec<u8> {
+        let seq_payload = if still_picture {
+            sequence::encode_still_picture_sequence_header_with_level(
+                self.width,
+                self.height,
+                &self.config.video_signal,
+                self.sequence_level_idx,
+            )
+        } else {
+            sequence::encode_sequence_header_with_level(
+                self.width,
+                self.height,
+                &self.config.video_signal,
+                self.sequence_level_idx,
+            )
+        };
+        let mut out = obu::obu_wrap(obu::ObuType::SequenceHeader, &seq_payload);
         for m in self.metadata_obus() {
             out.extend_from_slice(&m);
         }
@@ -881,6 +898,27 @@ mod tests {
         let headers = enc.headers();
         assert_eq!(headers[0], 0x0A);
         assert!(!headers.is_empty());
+    }
+
+    #[test]
+    fn headers_still_picture_sets_still_flag_without_reduced_header() {
+        let config = EncoderConfig {
+            base_q_idx: 128,
+            keyint: 25,
+            target_bitrate: None,
+            fps: Fps::default(),
+            b_frames: false,
+            gop_size: 3,
+            video_signal: VideoSignal::default(),
+            content_light: None,
+            mastering_display: None,
+        };
+        let enc = Encoder::new(64, 64, config).unwrap();
+        let headers = enc.headers_still_picture();
+
+        assert_eq!(headers[0], 0x0A);
+        assert_eq!(headers[2] & 0b0001_0000, 0b0001_0000);
+        assert_eq!(headers[2] & 0b0000_1000, 0);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 
 use crate::mp4::{box_wrap, build_av1c, build_colr, full_box, strip_temporal_delimiters};
-use wav1c::{BitDepth, VideoSignal};
+use wav1c::{BitDepth, ContentLightLevel, MasteringDisplayMetadata, VideoSignal};
 
 #[cfg(feature = "heic")]
 const TMAP_GAIN_MAX_FLOOR: f64 = 2.5;
@@ -13,6 +13,8 @@ pub struct AvifConfig {
     pub height: u32,
     pub config_obus: Vec<u8>,
     pub video_signal: VideoSignal,
+    pub content_light: Option<ContentLightLevel>,
+    pub mastering_display: Option<MasteringDisplayMetadata>,
 }
 
 #[cfg(feature = "heic")]
@@ -207,8 +209,78 @@ fn has_identical_channels(metadata: &ToneMapMetadata) -> bool {
         && metadata.alternate_offset[0] == metadata.alternate_offset[2]
 }
 
+fn build_item_obu_data(config_obus: &[u8], packet_obu_data: &[u8]) -> Vec<u8> {
+    let packet_data = strip_temporal_delimiters(packet_obu_data);
+    let frame_offset = strip_leading_seq_and_metadata_offset(&packet_data);
+    let frame_data = &packet_data[frame_offset..];
+
+    let mut out = Vec::with_capacity(config_obus.len() + frame_data.len());
+    out.extend_from_slice(config_obus);
+    out.extend_from_slice(frame_data);
+    out
+}
+
+fn strip_leading_seq_and_metadata_offset(data: &[u8]) -> usize {
+    let mut pos = 0usize;
+    while pos < data.len() {
+        let Some((obu_type, obu_len)) = parse_obu_type_and_len(data, pos) else {
+            break;
+        };
+        if obu_type == 1 || obu_type == 2 || obu_type == 5 {
+            pos += obu_len;
+            continue;
+        }
+        break;
+    }
+    pos
+}
+
+fn parse_obu_type_and_len(data: &[u8], start: usize) -> Option<(u8, usize)> {
+    if start >= data.len() {
+        return None;
+    }
+    let header = data[start];
+    let obu_type = (header >> 3) & 0x0F;
+    let extension_flag = ((header >> 2) & 1) != 0;
+    let has_size_field = ((header >> 1) & 1) != 0;
+    let mut pos = start + 1;
+    if extension_flag {
+        if pos >= data.len() {
+            return None;
+        }
+        pos += 1;
+    }
+    if !has_size_field {
+        return None;
+    }
+
+    let mut size = 0usize;
+    let mut shift = 0usize;
+    let mut leb_len = 0usize;
+    loop {
+        if pos >= data.len() || shift > 63 || leb_len > 8 {
+            return None;
+        }
+        let byte = data[pos];
+        pos += 1;
+        leb_len += 1;
+        size |= ((byte & 0x7F) as usize) << shift;
+        if (byte & 0x80) == 0 {
+            break;
+        }
+        shift += 7;
+    }
+
+    let header_and_size_len = pos - start;
+    let total_len = header_and_size_len.checked_add(size)?;
+    if start.checked_add(total_len)? > data.len() {
+        return None;
+    }
+    Some((obu_type, total_len))
+}
+
 pub fn write_avif<W: Write>(w: &mut W, config: &AvifConfig, obu_data: &[u8]) -> io::Result<()> {
-    let data = strip_temporal_delimiters(obu_data);
+    let data = build_item_obu_data(&config.config_obus, obu_data);
 
     let ftyp = build_ftyp();
     let hdlr = build_hdlr();
@@ -257,8 +329,8 @@ pub fn write_avif_with_tmap_gain_map<W: Write>(
     gain_map_obu_data: &[u8],
     tmap_payload: &[u8],
 ) -> io::Result<()> {
-    let base_data = strip_temporal_delimiters(base_obu_data);
-    let gain_map_data = strip_temporal_delimiters(gain_map_obu_data);
+    let base_data = build_item_obu_data(&base_config.config_obus, base_obu_data);
+    let gain_map_data = build_item_obu_data(&gain_map_config.config_obus, gain_map_obu_data);
     let mut mdat_payload = Vec::new();
     mdat_payload.extend_from_slice(&base_data);
     mdat_payload.extend_from_slice(tmap_payload);
@@ -478,19 +550,47 @@ fn build_grpl_altr_tmap() -> Vec<u8> {
 }
 
 fn build_iprp_single(config: &AvifConfig) -> Vec<u8> {
-    let av1c = build_av1c(config.video_signal.bit_depth, &config.config_obus);
-    let ispe = build_ispe(config.width, config.height);
-    let colr = build_colr(&config.video_signal);
-    let pixi = build_pixi(config.video_signal.bit_depth);
-
     let mut ipco_payload = Vec::new();
-    ipco_payload.extend_from_slice(&av1c);
-    ipco_payload.extend_from_slice(&ispe);
-    ipco_payload.extend_from_slice(&colr);
-    ipco_payload.extend_from_slice(&pixi);
+    let mut next_property_index = 1u8;
+    let mut base_associations = vec![
+        append_property(
+            &mut ipco_payload,
+            &mut next_property_index,
+            build_av1c(config.video_signal.bit_depth, &config.config_obus),
+        ),
+        append_property(
+            &mut ipco_payload,
+            &mut next_property_index,
+            build_ispe(config.width, config.height),
+        ),
+        append_property(
+            &mut ipco_payload,
+            &mut next_property_index,
+            build_colr(&config.video_signal),
+        ),
+        append_property(
+            &mut ipco_payload,
+            &mut next_property_index,
+            build_pixi(config.video_signal.bit_depth),
+        ),
+    ];
+    if let Some(cll) = config.content_light {
+        base_associations.push(append_property(
+            &mut ipco_payload,
+            &mut next_property_index,
+            build_clli(&cll),
+        ));
+    }
+    if let Some(mdcv) = config.mastering_display {
+        base_associations.push(append_property(
+            &mut ipco_payload,
+            &mut next_property_index,
+            build_mdcv(&mdcv),
+        ));
+    }
     let ipco = box_wrap(b"ipco", &ipco_payload);
-
-    let ipma = build_ipma_single();
+    let ipma_entries = [(1u16, base_associations.as_slice())];
+    let ipma = build_ipma(&ipma_entries);
 
     let mut p = Vec::new();
     p.extend_from_slice(&ipco);
@@ -501,20 +601,89 @@ fn build_iprp_single(config: &AvifConfig) -> Vec<u8> {
 #[cfg(feature = "heic")]
 fn build_iprp_tmap(base: &AvifConfig, gain: &AvifConfig) -> Vec<u8> {
     let mut ipco_payload = Vec::new();
-    ipco_payload.extend_from_slice(&build_av1c(base.video_signal.bit_depth, &base.config_obus)); // 1
-    ipco_payload.extend_from_slice(&build_ispe(base.width, base.height)); // 2
-    ipco_payload.extend_from_slice(&build_colr(&base.video_signal)); // 3
-    ipco_payload.extend_from_slice(&build_pixi(base.video_signal.bit_depth)); // 4
-    ipco_payload.extend_from_slice(&build_ispe(base.width, base.height)); // 5
-    ipco_payload.extend_from_slice(&build_colr(&base.video_signal)); // 6
-    ipco_payload.extend_from_slice(&build_pixi(base.video_signal.bit_depth)); // 7
-    ipco_payload.extend_from_slice(&build_av1c(gain.video_signal.bit_depth, &gain.config_obus)); // 8
-    ipco_payload.extend_from_slice(&build_ispe(gain.width, gain.height)); // 9
-    ipco_payload.extend_from_slice(&build_colr(&gain.video_signal)); // 10
-    ipco_payload.extend_from_slice(&build_pixi(gain.video_signal.bit_depth)); // 11
-    let ipco = box_wrap(b"ipco", &ipco_payload);
+    let mut next_property_index = 1u8;
 
-    let ipma = build_ipma_tmap();
+    let mut base_associations = Vec::new();
+    base_associations.push(append_property(
+        &mut ipco_payload,
+        &mut next_property_index,
+        build_av1c(base.video_signal.bit_depth, &base.config_obus),
+    ));
+    base_associations.push(append_property(
+        &mut ipco_payload,
+        &mut next_property_index,
+        build_ispe(base.width, base.height),
+    ));
+    base_associations.push(append_property(
+        &mut ipco_payload,
+        &mut next_property_index,
+        build_colr(&base.video_signal),
+    ));
+    base_associations.push(append_property(
+        &mut ipco_payload,
+        &mut next_property_index,
+        build_pixi(base.video_signal.bit_depth),
+    ));
+    if let Some(cll) = base.content_light {
+        base_associations.push(append_property(
+            &mut ipco_payload,
+            &mut next_property_index,
+            build_clli(&cll),
+        ));
+    }
+    if let Some(mdcv) = base.mastering_display {
+        base_associations.push(append_property(
+            &mut ipco_payload,
+            &mut next_property_index,
+            build_mdcv(&mdcv),
+        ));
+    }
+
+    let mut tmap_associations = Vec::new();
+    tmap_associations.push(append_property(
+        &mut ipco_payload,
+        &mut next_property_index,
+        build_ispe(base.width, base.height),
+    ));
+    tmap_associations.push(append_property(
+        &mut ipco_payload,
+        &mut next_property_index,
+        build_colr(&base.video_signal),
+    ));
+    tmap_associations.push(append_property(
+        &mut ipco_payload,
+        &mut next_property_index,
+        build_pixi(base.video_signal.bit_depth),
+    ));
+
+    let mut gain_associations = Vec::new();
+    gain_associations.push(append_property(
+        &mut ipco_payload,
+        &mut next_property_index,
+        build_av1c(gain.video_signal.bit_depth, &gain.config_obus),
+    ));
+    gain_associations.push(append_property(
+        &mut ipco_payload,
+        &mut next_property_index,
+        build_ispe(gain.width, gain.height),
+    ));
+    gain_associations.push(append_property(
+        &mut ipco_payload,
+        &mut next_property_index,
+        build_colr(&gain.video_signal),
+    ));
+    gain_associations.push(append_property(
+        &mut ipco_payload,
+        &mut next_property_index,
+        build_pixi(gain.video_signal.bit_depth),
+    ));
+    let ipco = box_wrap(b"ipco", &ipco_payload);
+    let ipma_entries = [
+        (1u16, base_associations.as_slice()),
+        (2u16, tmap_associations.as_slice()),
+        (3u16, gain_associations.as_slice()),
+    ];
+    let ipma = build_ipma(&ipma_entries);
 
     let mut p = Vec::new();
     p.extend_from_slice(&ipco);
@@ -535,48 +704,135 @@ fn build_pixi(bit_depth: BitDepth) -> Vec<u8> {
     full_box(b"pixi", 0, 0, &p)
 }
 
-fn build_ipma_single() -> Vec<u8> {
+fn build_clli(cll: &ContentLightLevel) -> Vec<u8> {
     let mut p = Vec::new();
-    p.extend_from_slice(&1u32.to_be_bytes()); // entry_count
-    p.extend_from_slice(&1u16.to_be_bytes()); // item_id
-    p.push(4); // association_count
-    p.push(0x81);
-    p.push(0x82);
-    p.push(0x83);
-    p.push(0x84);
+    p.extend_from_slice(&cll.max_content_light_level.to_be_bytes());
+    p.extend_from_slice(&cll.max_frame_average_light_level.to_be_bytes());
+    box_wrap(b"clli", &p)
+}
+
+fn build_mdcv(mdcv: &MasteringDisplayMetadata) -> Vec<u8> {
+    let mut p = Vec::new();
+    for primary in mdcv.primaries {
+        p.extend_from_slice(&primary[0].to_be_bytes());
+        p.extend_from_slice(&primary[1].to_be_bytes());
+    }
+    p.extend_from_slice(&mdcv.white_point[0].to_be_bytes());
+    p.extend_from_slice(&mdcv.white_point[1].to_be_bytes());
+    p.extend_from_slice(&mdcv.max_luminance.to_be_bytes());
+    p.extend_from_slice(&mdcv.min_luminance.to_be_bytes());
+    box_wrap(b"mdcv", &p)
+}
+
+fn append_property(
+    ipco_payload: &mut Vec<u8>,
+    next_property_index: &mut u8,
+    property: Vec<u8>,
+) -> u8 {
+    let property_index = *next_property_index;
+    ipco_payload.extend_from_slice(&property);
+    *next_property_index = next_property_index
+        .checked_add(1)
+        .expect("AVIF property index overflow");
+    property_index
+}
+
+fn build_ipma(entries: &[(u16, &[u8])]) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+
+    for (item_id, associations) in entries {
+        p.extend_from_slice(&item_id.to_be_bytes());
+        p.push(associations.len() as u8);
+        for property_index in *associations {
+            p.push(0x80 | *property_index);
+        }
+    }
+
     full_box(b"ipma", 0, 0, &p)
 }
 
-#[cfg(feature = "heic")]
-fn build_ipma_tmap() -> Vec<u8> {
-    let mut p = Vec::new();
-    p.extend_from_slice(&3u32.to_be_bytes()); // entry_count
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wav1c::{ColorDescription, ColorRange, VideoSignal};
 
-    p.extend_from_slice(&1u16.to_be_bytes()); // base item id
-    p.push(4);
-    p.push(0x81);
-    p.push(0x82);
-    p.push(0x83);
-    p.push(0x84);
+    fn sample_signal(bit_depth: BitDepth) -> VideoSignal {
+        VideoSignal {
+            bit_depth,
+            color_range: ColorRange::Full,
+            color_description: Some(ColorDescription {
+                color_primaries: 9,
+                transfer_characteristics: 16,
+                matrix_coefficients: 9,
+            }),
+        }
+    }
 
-    p.extend_from_slice(&2u16.to_be_bytes()); // tmap item id
-    p.push(3);
-    p.push(0x85);
-    p.push(0x86);
-    p.push(0x87);
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
 
-    p.extend_from_slice(&3u16.to_be_bytes()); // gain map item id
-    p.push(4);
-    p.push(0x88);
-    p.push(0x89);
-    p.push(0x8A);
-    p.push(0x8B);
+    #[test]
+    fn single_item_avif_includes_clli_and_mdcv_properties() {
+        let cll = ContentLightLevel {
+            max_content_light_level: 480,
+            max_frame_average_light_level: 21,
+        };
+        let mdcv = MasteringDisplayMetadata {
+            primaries: [[34000, 16000], [13250, 34500], [7500, 3000]],
+            white_point: [15635, 16450],
+            max_luminance: 10_000_000,
+            min_luminance: 1,
+        };
+        let config = AvifConfig {
+            width: 64,
+            height: 64,
+            config_obus: vec![0x0A, 0x01, 0x80],
+            video_signal: sample_signal(BitDepth::Ten),
+            content_light: Some(cll),
+            mastering_display: Some(mdcv),
+        };
 
-    full_box(b"ipma", 0, 0, &p)
+        let mut out = Vec::new();
+        write_avif(&mut out, &config, &[0x12, 0x00, 0x11, 0x22]).expect("write");
+
+        assert!(contains(&out, &build_clli(&cll)));
+        assert!(contains(&out, &build_mdcv(&mdcv)));
+    }
+
+    #[test]
+    fn single_item_avif_omits_hdr_item_properties_when_unset() {
+        let config = AvifConfig {
+            width: 64,
+            height: 64,
+            config_obus: vec![0x0A, 0x01, 0x80],
+            video_signal: sample_signal(BitDepth::Ten),
+            content_light: None,
+            mastering_display: None,
+        };
+
+        let mut out = Vec::new();
+        write_avif(&mut out, &config, &[0x12, 0x00, 0x11, 0x22]).expect("write");
+
+        assert!(!contains(&out, b"clli"));
+        assert!(!contains(&out, b"mdcv"));
+    }
+
+    #[test]
+    fn item_data_uses_config_obus_and_drops_packet_seq_prefix() {
+        let config_obus = vec![0x0A, 0x01, 0x1C];
+        let packet_data = vec![0x12, 0x00, 0x0A, 0x01, 0x00, 0x32, 0x01, 0xAA];
+
+        let out = build_item_obu_data(&config_obus, &packet_data);
+
+        assert!(out.starts_with(&config_obus));
+        assert_eq!(&out[config_obus.len()..], &[0x32, 0x01, 0xAA]);
+    }
 }
 
 #[cfg(all(test, feature = "heic"))]
-mod tests {
+mod heic_tests {
     use super::*;
     use wav1c::{ColorDescription, ColorRange, VideoSignal};
 
@@ -603,27 +859,84 @@ mod tests {
         assert_eq!(metadata.gain_map_min[0], SignedFraction { n: 0, d: 1 });
         assert_eq!(metadata.gain_map_min[1], SignedFraction { n: 0, d: 1 });
         assert_eq!(metadata.gain_map_min[2], SignedFraction { n: 0, d: 1 });
-        assert_eq!(metadata.gain_map_max[0], SignedFraction { n: 2_500_000, d: 1_000_000 });
-        assert_eq!(metadata.gain_map_max[1], SignedFraction { n: 2_500_000, d: 1_000_000 });
-        assert_eq!(metadata.gain_map_max[2], SignedFraction { n: 2_500_000, d: 1_000_000 });
+        assert_eq!(
+            metadata.gain_map_max[0],
+            SignedFraction {
+                n: 2_500_000,
+                d: 1_000_000
+            }
+        );
+        assert_eq!(
+            metadata.gain_map_max[1],
+            SignedFraction {
+                n: 2_500_000,
+                d: 1_000_000
+            }
+        );
+        assert_eq!(
+            metadata.gain_map_max[2],
+            SignedFraction {
+                n: 2_500_000,
+                d: 1_000_000
+            }
+        );
     }
 
     #[test]
     fn derive_tmap_preserves_larger_headroom() {
         let metadata =
             derive_tmap_metadata_from_apple(7, 2, 1, 100).expect("derive should succeed");
-        assert_eq!(metadata.gain_map_max[0], SignedFraction { n: 3_500_000, d: 1_000_000 });
-        assert_eq!(metadata.gain_map_max[1], SignedFraction { n: 3_500_000, d: 1_000_000 });
-        assert_eq!(metadata.gain_map_max[2], SignedFraction { n: 3_500_000, d: 1_000_000 });
+        assert_eq!(
+            metadata.gain_map_max[0],
+            SignedFraction {
+                n: 3_500_000,
+                d: 1_000_000
+            }
+        );
+        assert_eq!(
+            metadata.gain_map_max[1],
+            SignedFraction {
+                n: 3_500_000,
+                d: 1_000_000
+            }
+        );
+        assert_eq!(
+            metadata.gain_map_max[2],
+            SignedFraction {
+                n: 3_500_000,
+                d: 1_000_000
+            }
+        );
     }
 
     #[test]
     fn derive_tmap_accepts_zero_hdr_gain() {
         let metadata = derive_tmap_metadata_from_apple(1, 2, 0, 1).expect("derive should succeed");
-        assert_eq!(metadata.alternate_hdr_headroom, UnsignedFraction { n: 1, d: 2 });
-        assert_eq!(metadata.gain_map_max[0], SignedFraction { n: 2_500_000, d: 1_000_000 });
-        assert_eq!(metadata.gain_map_max[1], SignedFraction { n: 2_500_000, d: 1_000_000 });
-        assert_eq!(metadata.gain_map_max[2], SignedFraction { n: 2_500_000, d: 1_000_000 });
+        assert_eq!(
+            metadata.alternate_hdr_headroom,
+            UnsignedFraction { n: 1, d: 2 }
+        );
+        assert_eq!(
+            metadata.gain_map_max[0],
+            SignedFraction {
+                n: 2_500_000,
+                d: 1_000_000
+            }
+        );
+        assert_eq!(
+            metadata.gain_map_max[1],
+            SignedFraction {
+                n: 2_500_000,
+                d: 1_000_000
+            }
+        );
+        assert_eq!(
+            metadata.gain_map_max[2],
+            SignedFraction {
+                n: 2_500_000,
+                d: 1_000_000
+            }
+        );
     }
 
     #[test]
@@ -671,6 +984,8 @@ mod tests {
             height: 480,
             config_obus: vec![0x01, 0x02, 0x03],
             video_signal: sample_signal(BitDepth::Eight),
+            content_light: None,
+            mastering_display: None,
         };
         let gain_cfg = AvifConfig {
             width: 320,
@@ -685,6 +1000,8 @@ mod tests {
                     matrix_coefficients: 2,
                 }),
             },
+            content_light: None,
+            mastering_display: None,
         };
         let tmap = vec![0u8; 62];
         let mut out = Vec::new();

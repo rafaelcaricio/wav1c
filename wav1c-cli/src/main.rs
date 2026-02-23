@@ -471,6 +471,14 @@ fn validate_output_dimensions(format: OutputFormat, width: u32, height: u32) -> 
     Ok(())
 }
 
+fn avif_config_obus(encoder: &wav1c::Encoder, packet_count: usize) -> Vec<u8> {
+    if packet_count == 1 {
+        encoder.headers_still_picture()
+    } else {
+        encoder.headers()
+    }
+}
+
 fn main() {
     let mut cli = parse_cli();
     let format = detect_format(&cli.output_path);
@@ -837,14 +845,18 @@ fn main() {
                     let base_avif_config = avif::AvifConfig {
                         width,
                         height,
-                        config_obus: encoder.headers(),
+                        config_obus: avif_config_obus(&encoder, packets.len()),
                         video_signal: cli.config.video_signal,
+                        content_light: cli.config.content_light,
+                        mastering_display: cli.config.mastering_display,
                     };
                     let gain_map_avif_config = avif::AvifConfig {
                         width: gain_map_frame.width,
                         height: gain_map_frame.height,
-                        config_obus: gain_encoder.headers(),
+                        config_obus: avif_config_obus(&gain_encoder, gain_packets.len()),
                         video_signal: gain_map_encode_config.video_signal,
+                        content_light: None,
+                        mastering_display: None,
                     };
                     avif::write_avif_with_tmap_gain_map(
                         &mut output,
@@ -867,8 +879,10 @@ fn main() {
                 let avif_config = avif::AvifConfig {
                     width,
                     height,
-                    config_obus: encoder.headers(),
+                    config_obus: avif_config_obus(&encoder, packets.len()),
                     video_signal: cli.config.video_signal,
+                    content_light: cli.config.content_light,
+                    mastering_display: cli.config.mastering_display,
                 };
                 avif::write_avif(&mut output, &avif_config, &packets[0].data).unwrap();
             }

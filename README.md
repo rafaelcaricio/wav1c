@@ -22,6 +22,9 @@ A spec-compliant AV1 encoder written from scratch in safe Rust with zero runtime
   - HDR metadata OBUs:
     - CLL (`max_cll`, `max_fall`)
     - MDCV (mastering display metadata)
+  - AVIF compatibility signaling:
+    - AVIF item properties: `clli` (+ optional `mdcv`)
+    - Single-frame AVIF sequence headers set `still_picture=1`
 - Y4M parsing:
   - `C420*` 8-bit and `C420p10`
   - `XCOLORRANGE=FULL|LIMITED` in stream and `FRAME` headers
