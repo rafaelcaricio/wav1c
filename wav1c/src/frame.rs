@@ -110,7 +110,8 @@ pub fn encode_frame_with_recon(
 
     w.write_bit(false);
 
-    write_loopfilter_params(&mut w, base_q_idx);
+    let lfp = crate::deblock::loop_filter_params_for_qidx(base_q_idx);
+    write_loopfilter_params(&mut w, &lfp);
     write_cdef_params(&mut w, base_q_idx);
 
     w.write_bit(false);
@@ -120,6 +121,9 @@ pub fn encode_frame_with_recon(
     let (tile_payloads, mut recon) =
         crate::tile::encode_tiles_with_recon(pixels, dq, base_q_idx, &tile_plan);
     let tile_group_payload = build_tile_group_payload(&tile_payloads);
+
+    // Loop filter (deblocking) must be applied BEFORE CDEF (AV1 spec §7.14).
+    crate::deblock::apply_loop_filter(&mut recon, &lfp);
 
     let (damping_minus_3, y_strength, _uv_strength) = cdef_strength_for_qidx(base_q_idx);
     crate::cdef::apply_cdef_frame(
@@ -211,21 +215,24 @@ fn write_cdef_params(w: &mut BitWriter, base_q_idx: u8) {
     w.write_bits(uv_strength as u64, 6);
 }
 
-fn loop_filter_level_for_qidx(_base_q_idx: u8) -> u8 {
-    0
-}
+/// Write loop_filter_params to the frame header per AV1 spec §5.9.9.
+fn write_loopfilter_params(w: &mut BitWriter, lfp: &crate::deblock::LoopFilterParams) {
+    // loop_filter_level[0] (Y vertical), loop_filter_level[1] (Y horizontal)
+    w.write_bits(lfp.y_vert_level as u64, 6);
+    w.write_bits(lfp.y_horiz_level as u64, 6);
 
-fn write_loopfilter_params(w: &mut BitWriter, base_q_idx: u8) {
-    let level = loop_filter_level_for_qidx(base_q_idx);
-    w.write_bits(level as u64, 6);
-    w.write_bits(level as u64, 6);
-    if level > 0 {
-        w.write_bits(level as u64, 6);
-        w.write_bits(level as u64, 6);
+    // NumPlanes is always 3 in wav1c's current 4:2:0 scope. UV levels are
+    // signaled whenever either Y level is non-zero.
+    if lfp.y_vert_level > 0 || lfp.y_horiz_level > 0 {
+        w.write_bits(lfp.uv_vert_level as u64, 6);
+        w.write_bits(lfp.uv_horiz_level as u64, 6);
     }
-    w.write_bits(0, 3);
-    w.write_bit(true);
-    w.write_bit(false);
+
+    w.write_bits(lfp.sharpness as u64, 3);
+    w.write_bit(lfp.delta_enabled);
+    if lfp.delta_enabled {
+        w.write_bit(lfp.delta_update);
+    }
 }
 
 pub fn encode_inter_frame(
@@ -317,7 +324,8 @@ pub fn encode_inter_frame_with_recon(
 
     w.write_bit(false);
 
-    write_loopfilter_params(&mut w, base_q_idx);
+    let lfp = crate::deblock::loop_filter_params_for_qidx(base_q_idx);
+    write_loopfilter_params(&mut w, &lfp);
     write_cdef_params(&mut w, base_q_idx);
 
     w.write_bit(false);
@@ -338,6 +346,9 @@ pub fn encode_inter_frame_with_recon(
         &tile_plan,
     );
     let tile_group_payload = build_tile_group_payload(&tile_payloads);
+
+    // Loop filter (deblocking) must be applied BEFORE CDEF (AV1 spec §7.14).
+    crate::deblock::apply_loop_filter(&mut recon, &lfp);
 
     let (damping_minus_3, y_strength, _uv_strength) = cdef_strength_for_qidx(base_q_idx);
     crate::cdef::apply_cdef_frame(
@@ -363,8 +374,26 @@ mod tests {
 
     #[test]
     fn loop_filter_level_mapping() {
-        for q in 0..=255u8 {
-            assert_eq!(loop_filter_level_for_qidx(q), 0);
+        // Low QP (very high quality) → no filtering needed
+        let lfp_low = crate::deblock::loop_filter_params_for_qidx(0);
+        assert_eq!(lfp_low.y_vert_level, 0);
+        assert_eq!(lfp_low.y_horiz_level, 0);
+
+        // Mid-high QP → moderate filtering
+        let lfp_mid = crate::deblock::loop_filter_params_for_qidx(128);
+        assert!(lfp_mid.y_vert_level > 0);
+        assert!(lfp_mid.y_vert_level <= 63);
+
+        // Very high QP → strong filtering
+        let lfp_high = crate::deblock::loop_filter_params_for_qidx(255);
+        assert!(lfp_high.y_vert_level >= lfp_mid.y_vert_level);
+        assert!(lfp_high.y_vert_level <= 63);
+
+        // Monotonicity
+        for q in 5..=255u8 {
+            let prev = crate::deblock::loop_filter_params_for_qidx(q - 1).y_vert_level;
+            let curr = crate::deblock::loop_filter_params_for_qidx(q).y_vert_level;
+            assert!(curr >= prev, "loop filter level not monotonic at q={}", q);
         }
     }
 
@@ -414,6 +443,7 @@ mod tests {
     fn frame_header_64x64_bit_layout() {
         let pixels = FramePixels::solid(64, 64, 128, 128, 128);
         let bytes = encode_frame(&pixels);
+        let lfp = crate::deblock::loop_filter_params_for_qidx(128);
 
         let mut expected = BitWriter::new();
 
@@ -438,11 +468,14 @@ mod tests {
 
         expected.write_bit(false);
 
-        expected.write_bits(0, 6);
-        expected.write_bits(0, 6);
-        expected.write_bits(0, 3);
-        expected.write_bit(true);
-        expected.write_bit(false);
+        // Loop filter params: Y vert, Y horiz, UV vert, UV horiz, sharpness, deltas
+        expected.write_bits(lfp.y_vert_level as u64, 6);
+        expected.write_bits(lfp.y_horiz_level as u64, 6);
+        expected.write_bits(lfp.uv_vert_level as u64, 6);
+        expected.write_bits(lfp.uv_horiz_level as u64, 6);
+        expected.write_bits(lfp.sharpness as u64, 3);
+        expected.write_bit(lfp.delta_enabled);
+        expected.write_bit(lfp.delta_update);
 
         expected.write_bits(2, 2);
         expected.write_bits(0, 2);
@@ -484,6 +517,7 @@ mod tests {
 
     #[test]
     fn frame_header_320x240_has_tile_bits() {
+        let lfp = crate::deblock::loop_filter_params_for_qidx(128);
         let mut expected = BitWriter::new();
 
         expected.write_bit(false);
@@ -511,11 +545,13 @@ mod tests {
 
         expected.write_bit(false);
 
-        expected.write_bits(0, 6);
-        expected.write_bits(0, 6);
-        expected.write_bits(0, 3);
-        expected.write_bit(true);
-        expected.write_bit(false);
+        expected.write_bits(lfp.y_vert_level as u64, 6);
+        expected.write_bits(lfp.y_horiz_level as u64, 6);
+        expected.write_bits(lfp.uv_vert_level as u64, 6);
+        expected.write_bits(lfp.uv_horiz_level as u64, 6);
+        expected.write_bits(lfp.sharpness as u64, 3);
+        expected.write_bit(lfp.delta_enabled);
+        expected.write_bit(lfp.delta_update);
 
         expected.write_bits(2, 2);
         expected.write_bits(0, 2);
@@ -536,6 +572,7 @@ mod tests {
         let pixels = FramePixels::solid(64, 64, 128, 128, 128);
         let reference = FramePixels::solid(64, 64, 128, 128, 128);
         let bytes = encode_inter_frame(&pixels, &reference, 0x01, 0, true);
+        let lfp = crate::deblock::loop_filter_params_for_qidx(128);
 
         let mut expected = BitWriter::new();
 
@@ -571,11 +608,14 @@ mod tests {
 
         expected.write_bit(false);
 
-        expected.write_bits(0, 6);
-        expected.write_bits(0, 6);
-        expected.write_bits(0, 3);
-        expected.write_bit(true);
-        expected.write_bit(false);
+        // Loop filter params for inter: all 4 levels + sharpness + deltas
+        expected.write_bits(lfp.y_vert_level as u64, 6);
+        expected.write_bits(lfp.y_horiz_level as u64, 6);
+        expected.write_bits(lfp.uv_vert_level as u64, 6);
+        expected.write_bits(lfp.uv_horiz_level as u64, 6);
+        expected.write_bits(lfp.sharpness as u64, 3);
+        expected.write_bit(lfp.delta_enabled);
+        expected.write_bit(lfp.delta_update);
 
         expected.write_bits(2, 2);
         expected.write_bits(0, 2);

@@ -2,6 +2,7 @@
 
 pub mod bitwriter;
 pub mod cdef;
+pub mod deblock;
 pub mod cdf;
 pub mod cdf_coef;
 pub mod dequant;
